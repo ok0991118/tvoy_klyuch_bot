@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Бот-воронка «Твой ключ на чердаке» для Наташи Люлькиной
-Платформа: Max (max.ru) — API v2
-Документация: https://dev.max.ru/docs-api
+Платформа: Max (max.ru) — API v3 (финальная, по реальным логам)
 """
 
 import os
@@ -19,9 +18,9 @@ ADMIN_ID = os.getenv("ADMIN_ID", "")
 WEBHOOK_PATH = "/webhook"
 DATA_FILE = "users_state.json"
 
-# API endpoints (официальные из документации Max)
-API_SUBSCRIPTIONS = "https://platform-api.max.ru"      # для webhook/subscriptions
-API_MESSAGES = "https://platform-api2.max.ru"           # для отправки сообщений
+# API endpoints (по реальным логам и документации)
+API_SUBSCRIPTIONS = "https://platform-api.max.ru"
+API_MESSAGES = "https://platform-api2.max.ru"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,7 +71,8 @@ def max_send_message(chat_id, text, buttons=None):
         }]
 
     try:
-        r = requests.post(url, headers=HEADERS, json=payload, timeout=10)
+        # verify=False — обход SSL-ошибки (platform-api2 имеет проблемы с сертом)
+        r = requests.post(url, headers=HEADERS, json=payload, timeout=10, verify=False)
         r.raise_for_status()
         logger.info(f"Сообщение отправлено: {r.status_code}")
         return r.json()
@@ -80,26 +80,8 @@ def max_send_message(chat_id, text, buttons=None):
         logger.error(f"Ошибка отправки: {e}")
         return None
 
-def max_answer_callback(callback_id, text, buttons=None):
-    """Ответ на callback-кнопку"""
-    url = f"{API_MESSAGES}/answers?callback_id={callback_id}"
-    payload = {"message": {"text": text}}
-    if buttons:
-        payload["message"]["attachments"] = [{
-            "type": "inline_keyboard",
-            "payload": {"buttons": buttons}
-        }]
-
-    try:
-        r = requests.post(url, headers=HEADERS, json=payload, timeout=10)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        logger.error(f"Ошибка ответа на callback: {e}")
-        return None
-
 def subscribe_webhook(webhook_url):
-    """Подписка на webhook (вызывается при старте)"""
+    """Подписка на webhook"""
     url = f"{API_SUBSCRIPTIONS}/subscriptions"
     payload = {"url": webhook_url}
     try:
@@ -111,45 +93,58 @@ def subscribe_webhook(webhook_url):
         logger.error(f"Ошибка подписки webhook: {e}")
         return False
 
-# ==================== ПАРСИНГ UPDATE ОТ MAX ====================
+# ==================== ПАРСИНГ (ПО РЕАЛЬНЫМ ЛОГАМ) ====================
 def parse_max_update(data):
-    """Парсит входящий Update от Max API"""
+    """
+    Реальный формат Max (из логов):
+    {
+      "timestamp": 1788448061616,
+      "message": {
+        "recipient": {"chat_type": "dialog", "chat_id": 410210419, "user_id": 438695524},
+        "timestamp": 1788448061616,
+        "body": {"mid": "...", "seq": ..., "text": "Дом"},
+        "sender": {"user_id": 39233047, "first_name": "...", "last_name": "...", "is_bot": false, ...}
+      },
+      "user_locale": "ru",
+      "update_type": "message_created"
+    }
+    """
     logger.info(f"Webhook received: {json.dumps(data, ensure_ascii=False)[:800]}")
 
-    update_type = data.get("type", "")
-    payload = data.get("payload", data)
+    update_type = data.get("update_type", "")
 
-    # message_new — новое сообщение
-    if update_type == "message_new" or "message" in data:
-        msg = data.get("message", payload)
-        chat = msg.get("chat", {})
-        sender = msg.get("from", {})
+    # message_created — новое сообщение (реальный тип из логов)
+    if update_type == "message_created":
+        msg = data.get("message", {})
+        recipient = msg.get("recipient", {})
+        sender = msg.get("sender", {})
+        body = msg.get("body", {})
         return {
             "type": "message",
-            "chat_id": chat.get("id") or chat.get("chatId"),
-            "text": msg.get("text", ""),
-            "user_id": sender.get("id") or sender.get("userId"),
-            "msg_id": msg.get("id")
+            "chat_id": recipient.get("chat_id"),
+            "text": body.get("text", ""),
+            "user_id": sender.get("user_id"),
+            "msg_id": body.get("mid")
         }
 
     # message_callback — нажатие на кнопку
-    if update_type == "message_callback" or "callback" in data:
-        cb = data.get("callback", payload)
+    if update_type == "message_callback":
+        cb = data.get("callback", {})
         return {
             "type": "callback",
-            "chat_id": cb.get("chat", {}).get("id"),
+            "chat_id": cb.get("chat_id"),
             "data": cb.get("data", ""),
-            "user_id": cb.get("from", {}).get("id"),
-            "callback_id": cb.get("id") or cb.get("callbackId"),
+            "user_id": cb.get("from", {}).get("user_id"),
+            "callback_id": cb.get("id"),
             "msg_id": cb.get("message", {}).get("id")
         }
 
-    # bot_started — пользователь запустил бота
+    # bot_started
     if update_type == "bot_started":
         return {
             "type": "bot_started",
-            "chat_id": payload.get("chatId"),
-            "user_id": payload.get("userId"),
+            "chat_id": data.get("chat_id"),
+            "user_id": data.get("user_id"),
             "text": "/start"
         }
 
@@ -400,7 +395,7 @@ def handle_start(cid, users):
     save_users(users)
     max_send_message(cid, WELCOME, buttons=[[{"type": "callback", "text": "🚪 Открыть дверь", "callbackData": "start_quest"}]])
 
-def handle_callback(cid, data, users, callback_id=None):
+def handle_callback(cid, data, users):
     u = get_user(users, cid)
     st = u.get("state", "start")
 
@@ -496,7 +491,7 @@ def webhook():
         cid = update["chat_id"]
 
         if update["type"] == "callback":
-            handle_callback(cid, update["data"], users, update.get("callback_id"))
+            handle_callback(cid, update["data"], users)
             return jsonify({"ok": True}), 200
 
         if update["type"] in ["message", "bot_started"]:
@@ -528,7 +523,7 @@ def index():
 
 # ==================== ЗАПУСК ====================
 if __name__ == "__main__":
-    # При старте подписываем webhook (если URL известен)
+    # Подписка webhook при старте
     render_url = os.environ.get("RENDER_EXTERNAL_URL", "")
     if render_url and MAX_BOT_TOKEN:
         webhook_url = f"{render_url.rstrip('/')}{WEBHOOK_PATH}"
