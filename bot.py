@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Бот-воронка «Твой ключ на чердаке» для Наташи Люлькиной
-Платформа: Max (max.ru)
-Версия: 2.0 — адаптирован под Max API
+Платформа: Max (max.ru) — API v2
+Документация: https://dev.max.ru/docs-api
 """
 
 import os
@@ -19,17 +19,9 @@ ADMIN_ID = os.getenv("ADMIN_ID", "")
 WEBHOOK_PATH = "/webhook"
 DATA_FILE = "users_state.json"
 
-# === НАСТРОЙКА API MAX ===
-# В личном кабинете Max (business.max.ru или dev.max.ru) найди:
-# 1. Базовый URL API (обычно https://api.max.ru/bot/v1/ или https://api.bot.max.ru/)
-# 2. Формат отправки сообщений
-# 3. Как передавать токен (в заголовке Authorization: Bearer TOKEN или в параметре ?token=)
-#
-# Если неизвестно — оставь пустым, бот будет логировать входящие запросы,
-# чтобы ты могла увидеть формат и подстроить код.
-
-MAX_API_BASE = os.getenv("MAX_API_BASE", "https://api.max.ru/bot/v1")
-MAX_AUTH_HEADER = os.getenv("MAX_AUTH_HEADER", "Authorization")
+# API endpoints (официальные из документации Max)
+API_SUBSCRIPTIONS = "https://platform-api.max.ru"      # для webhook/subscriptions
+API_MESSAGES = "https://platform-api2.max.ru"           # для отправки сообщений
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,126 +52,109 @@ def get_user(users, uid):
         "room_choice": ""
     })
 
-# ==================== MAX API АДАПТЕР ====================
-class MaxAdapter:
-    """Адаптер для API Max. Поддерживает автоопределение формата."""
+# ==================== MAX API ====================
+HEADERS = {
+    "Authorization": MAX_BOT_TOKEN,
+    "Content-Type": "application/json"
+}
 
-    def __init__(self, token, api_base, auth_header):
-        self.token = token
-        self.api_base = api_base.rstrip("/")
-        self.auth_header = auth_header
-        self.headers = {
-            "Content-Type": "application/json"
-        }
-        if auth_header.lower() == "authorization":
-            self.headers["Authorization"] = f"Bearer {token}"
-        elif auth_header.lower() == "x-bot-token":
-            self.headers["X-Bot-Token"] = token
+def max_send_message(chat_id, text, buttons=None):
+    """Отправка сообщения через Max API"""
+    url = f"{API_MESSAGES}/messages"
+    payload = {
+        "chatId": chat_id,
+        "text": text
+    }
+    if buttons:
+        payload["attachments"] = [{
+            "type": "inline_keyboard",
+            "payload": {"buttons": buttons}
+        }]
 
-    def send_message(self, chat_id, text, buttons=None):
-        """Отправка сообщения. Автоматически пробует 2 формата."""
-
-        # Формат 1: Telegram-like (max использует похожий JSON)
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML"
-        }
-        if buttons:
-            payload["reply_markup"] = {"inline_keyboard": buttons}
-
-        # Пробуем разные endpoint'ы
-        endpoints = [
-            f"{self.api_base}/messages/sendText",
-            f"{self.api_base}/sendMessage",
-            f"https://api.max.ru/bot{self.token}/sendMessage",
-        ]
-
-        for url in endpoints:
-            try:
-                if "api.max.ru/bot" in url and self.token:
-                    # Telegram-совместимый формат (некоторые платформы поддерживают)
-                    r = requests.post(url, json=payload, headers=self.headers, timeout=10)
-                else:
-                    # Нативный Max формат
-                    data = {
-                        "token": self.token,
-                        "chatId": chat_id,
-                        "text": text
-                    }
-                    if buttons:
-                        data["inlineKeyboardMarkup"] = buttons
-                    r = requests.post(url, json=data, headers=self.headers, timeout=10)
-
-                if r.status_code == 200:
-                    logger.info(f"Сообщение отправлено через {url}")
-                    return r.json()
-            except Exception as e:
-                logger.warning(f"Не удалось отправить через {url}: {e}")
-                continue
-
-        logger.error("Все endpoint'ы для отправки сообщений недоступны")
+    try:
+        r = requests.post(url, headers=HEADERS, json=payload, timeout=10)
+        r.raise_for_status()
+        logger.info(f"Сообщение отправлено: {r.status_code}")
+        return r.json()
+    except Exception as e:
+        logger.error(f"Ошибка отправки: {e}")
         return None
 
-    def parse_update(self, data):
-        """Парсит входящий webhook. Поддерживает несколько форматов."""
-        logger.info(f"Входящий webhook: {json.dumps(data, ensure_ascii=False)[:500]}")
+def max_answer_callback(callback_id, text, buttons=None):
+    """Ответ на callback-кнопку"""
+    url = f"{API_MESSAGES}/answers?callback_id={callback_id}"
+    payload = {"message": {"text": text}}
+    if buttons:
+        payload["message"]["attachments"] = [{
+            "type": "inline_keyboard",
+            "payload": {"buttons": buttons}
+        }]
 
-        # Формат 1: Telegram-like (message / callback_query)
-        if "message" in data:
-            msg = data["message"]
-            return {
-                "type": "message",
-                "chat_id": msg.get("chat", {}).get("id"),
-                "text": msg.get("text", ""),
-                "user_id": msg.get("from", {}).get("id")
-            }
-
-        if "callback_query" in data:
-            cb = data["callback_query"]
-            return {
-                "type": "callback",
-                "chat_id": cb.get("message", {}).get("chat", {}).get("id"),
-                "data": cb.get("data", ""),
-                "user_id": cb.get("from", {}).get("id")
-            }
-
-        # Формат 2: ICQ/Max нативный (event + payload)
-        event = data.get("event", "")
-        payload = data.get("payload", {})
-
-        if event == "newMessage":
-            chat = payload.get("chat", {})
-            sender = payload.get("from", {})
-            return {
-                "type": "message",
-                "chat_id": chat.get("chatId") or chat.get("id"),
-                "text": payload.get("text", ""),
-                "user_id": sender.get("userId") or sender.get("id")
-            }
-
-        if event == "callbackQuery":
-            return {
-                "type": "callback",
-                "chat_id": payload.get("chat", {}).get("chatId"),
-                "data": payload.get("callbackData", ""),
-                "user_id": payload.get("from", {}).get("userId")
-            }
-
-        # Формат 3: Упрощённый (chatId, text на верхнем уровне)
-        if "chatId" in data or "chat_id" in data:
-            return {
-                "type": "message",
-                "chat_id": data.get("chatId") or data.get("chat_id"),
-                "text": data.get("text", ""),
-                "user_id": data.get("userId") or data.get("user_id")
-            }
-
-        logger.warning(f"Неизвестный формат webhook: {data}")
+    try:
+        r = requests.post(url, headers=HEADERS, json=payload, timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        logger.error(f"Ошибка ответа на callback: {e}")
         return None
 
-# Инициализация адаптера
-max_api = MaxAdapter(MAX_BOT_TOKEN, MAX_API_BASE, MAX_AUTH_HEADER)
+def subscribe_webhook(webhook_url):
+    """Подписка на webhook (вызывается при старте)"""
+    url = f"{API_SUBSCRIPTIONS}/subscriptions"
+    payload = {"url": webhook_url}
+    try:
+        r = requests.post(url, headers=HEADERS, json=payload, timeout=10)
+        r.raise_for_status()
+        logger.info(f"Webhook подписан: {r.json()}")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка подписки webhook: {e}")
+        return False
+
+# ==================== ПАРСИНГ UPDATE ОТ MAX ====================
+def parse_max_update(data):
+    """Парсит входящий Update от Max API"""
+    logger.info(f"Webhook received: {json.dumps(data, ensure_ascii=False)[:800]}")
+
+    update_type = data.get("type", "")
+    payload = data.get("payload", data)
+
+    # message_new — новое сообщение
+    if update_type == "message_new" or "message" in data:
+        msg = data.get("message", payload)
+        chat = msg.get("chat", {})
+        sender = msg.get("from", {})
+        return {
+            "type": "message",
+            "chat_id": chat.get("id") or chat.get("chatId"),
+            "text": msg.get("text", ""),
+            "user_id": sender.get("id") or sender.get("userId"),
+            "msg_id": msg.get("id")
+        }
+
+    # message_callback — нажатие на кнопку
+    if update_type == "message_callback" or "callback" in data:
+        cb = data.get("callback", payload)
+        return {
+            "type": "callback",
+            "chat_id": cb.get("chat", {}).get("id"),
+            "data": cb.get("data", ""),
+            "user_id": cb.get("from", {}).get("id"),
+            "callback_id": cb.get("id") or cb.get("callbackId"),
+            "msg_id": cb.get("message", {}).get("id")
+        }
+
+    # bot_started — пользователь запустил бота
+    if update_type == "bot_started":
+        return {
+            "type": "bot_started",
+            "chat_id": payload.get("chatId"),
+            "user_id": payload.get("userId"),
+            "text": "/start"
+        }
+
+    logger.warning(f"Неизвестный тип события: {update_type}")
+    return None
 
 # ==================== 27 РЕЗУЛЬТАТОВ ====================
 RESULTS = {
@@ -337,18 +312,18 @@ Q1 = """🚪 <b>Комната 1: «Фундамент»</b>
 
 Что чувствуешь?"""
 Q1_BTNS = [
-    [{"text": "🪨 Дом стоит крепко, но мне в нём тесно", "callback_data": "A"}],
-    [{"text": "🕳️ Под домом пустота. Боюсь, что рухнет", "callback_data": "B"}],
-    [{"text": "🌫️ Не помню, когда строила. Достался по наследству", "callback_data": "C"}]
+    [{"type": "callback", "text": "🪨 Дом стоит крепко, но мне в нём тесно", "callbackData": "A"}],
+    [{"type": "callback", "text": "🕳️ Под домом пустота. Боюсь, что рухнет", "callbackData": "B"}],
+    [{"type": "callback", "text": "🌫️ Не помню, когда строила. Достался по наследству", "callbackData": "C"}]
 ]
 
 Q2 = """🪟 <b>Комната 2: «Окно»</b>
 
 Загляни в окно. Что ты видишь?"""
 Q2_BTNS = [
-    [{"text": "🍫 Тарелку с едой. И вина: «опять»", "callback_data": "A"}],
-    [{"text": "💔 Пустое кресло. Или ссору. Или уход", "callback_data": "B"}],
-    [{"text": "📉 Счета, дела, список. И усталость", "callback_data": "C"}]
+    [{"type": "callback", "text": "🍫 Тарелку с едой. И вина: «опять»", "callbackData": "A"}],
+    [{"type": "callback", "text": "💔 Пустое кресло. Или ссору. Или уход", "callbackData": "B"}],
+    [{"type": "callback", "text": "📉 Счета, дела, список. И усталость", "callbackData": "C"}]
 ]
 
 Q3 = """🏚️ <b>Комната 3: «Чердак»</b>
@@ -357,9 +332,9 @@ Q3 = """🏚️ <b>Комната 3: «Чердак»</b>
 
 Что там?"""
 Q3_BTNS = [
-    [{"text": "👶 Маленькая ты. Спрятанная, чтобы быть «нормальной»", "callback_data": "A"}],
-    [{"text": "🔑 Ключ от двери, которую обходишь. «А вдруг?»", "callback_data": "B"}],
-    [{"text": "🪞 Зеркало. Ты, но не та, кто сейчас", "callback_data": "C"}]
+    [{"type": "callback", "text": "👶 Маленькая ты. Спрятанная, чтобы быть «нормальной»", "callbackData": "A"}],
+    [{"type": "callback", "text": "🔑 Ключ от двери, которую обходишь. «А вдруг?»", "callbackData": "B"}],
+    [{"type": "callback", "text": "🪞 Зеркало. Ты, но не та, кто сейчас", "callbackData": "C"}]
 ]
 
 AFTER_RESULT = """⚠️ <b>Но в твоём доме есть ещё 2 закрытые комнаты.</b>
@@ -379,9 +354,9 @@ AFTER_RESULT = """⚠️ <b>Но в твоём доме есть ещё 2 зак
 
 ROOM_CHOICE = """Я запишу для тебя личное голосовое с разбором твоего дома. Но мне нужно знать: какая из закрытых комнат тебя пугает больше?"""
 ROOM_BTNS = [
-    [{"text": "🧍‍♀️ Комната Тела", "callback_data": "room_body"}],
-    [{"text": "💞 Комната Отношений", "callback_data": "room_relations"}],
-    [{"text": "😰 Обе", "callback_data": "room_both"}]
+    [{"type": "callback", "text": "🧍‍♀️ Комната Тела", "callbackData": "room_body"}],
+    [{"type": "callback", "text": "💞 Комната Отношений", "callbackData": "room_relations"}],
+    [{"type": "callback", "text": "😰 Обе", "callbackData": "room_both"}]
 ]
 
 DIAG_TEXTS = {
@@ -416,35 +391,35 @@ DIAG_TEXTS = {
 Осталось <b>2 места</b> на этой неделе."""
 }
 
-BOOK_BTN = [[{"text": "📅 Забронировать диагностику", "callback_data": "book_diagnostic"}]]
+BOOK_BTN = [[{"type": "callback", "text": "📅 Забронировать диагностику", "callbackData": "book_diagnostic"}]]
 
 # ==================== ЛОГИКА БОТА ====================
 def handle_start(cid, users):
     u = get_user(users, cid)
     u["state"] = "q1"
     save_users(users)
-    max_api.send_message(cid, WELCOME, buttons=[[{"text": "🚪 Открыть дверь", "callback_data": "start_quest"}]])
+    max_send_message(cid, WELCOME, buttons=[[{"type": "callback", "text": "🚪 Открыть дверь", "callbackData": "start_quest"}]])
 
-def handle_callback(cid, data, users):
+def handle_callback(cid, data, users, callback_id=None):
     u = get_user(users, cid)
     st = u.get("state", "start")
 
     if data == "start_quest" and st == "q1":
-        max_api.send_message(cid, Q1, buttons=Q1_BTNS)
+        max_send_message(cid, Q1, buttons=Q1_BTNS)
         return
 
     if st == "q1" and data in "ABC":
         u["answers"]["q1"] = data
         u["state"] = "q2"
         save_users(users)
-        max_api.send_message(cid, Q2, buttons=Q2_BTNS)
+        max_send_message(cid, Q2, buttons=Q2_BTNS)
         return
 
     if st == "q2" and data in "ABC":
         u["answers"]["q2"] = data
         u["state"] = "q3"
         save_users(users)
-        max_api.send_message(cid, Q3, buttons=Q3_BTNS)
+        max_send_message(cid, Q3, buttons=Q3_BTNS)
         return
 
     if st == "q3" and data in "ABC":
@@ -455,11 +430,11 @@ def handle_callback(cid, data, users):
         u["result_time"] = datetime.now().isoformat()
         save_users(users)
 
-        max_api.send_message(cid, RESULTS.get(code, RESULTS["AAA"]))
+        max_send_message(cid, RESULTS.get(code, RESULTS["AAA"]))
         import time; time.sleep(2)
-        max_api.send_message(cid, AFTER_RESULT)
+        max_send_message(cid, AFTER_RESULT)
         time.sleep(2)
-        max_api.send_message(cid, ROOM_CHOICE, buttons=ROOM_BTNS)
+        max_send_message(cid, ROOM_CHOICE, buttons=ROOM_BTNS)
         u["state"] = "room"
         save_users(users)
         return
@@ -468,7 +443,7 @@ def handle_callback(cid, data, users):
         u["room_choice"] = data
         u["state"] = "booking"
         save_users(users)
-        max_api.send_message(cid, DIAG_TEXTS.get(data, DIAG_TEXTS["room_both"]), buttons=BOOK_BTN)
+        max_send_message(cid, DIAG_TEXTS.get(data, DIAG_TEXTS["room_both"]), buttons=BOOK_BTN)
         return
 
     if data == "book_diagnostic":
@@ -487,14 +462,14 @@ def handle_callback(cid, data, users):
 
 Или выбери быстрый слот 👇"""
         slots = [
-            [{"text": "Вт 19:00", "callback_data": "slot_tue_19"}],
-            [{"text": "Ср 16:00", "callback_data": "slot_wed_16"}],
-            [{"text": "Чт 18:00", "callback_data": "slot_thu_18"}]
+            [{"type": "callback", "text": "Вт 19:00", "callbackData": "slot_tue_19"}],
+            [{"type": "callback", "text": "Ср 16:00", "callbackData": "slot_wed_16"}],
+            [{"type": "callback", "text": "Чт 18:00", "callbackData": "slot_thu_18"}]
         ]
-        max_api.send_message(cid, txt, buttons=slots)
+        max_send_message(cid, txt, buttons=slots)
 
         if ADMIN_ID:
-            max_api.send_message(ADMIN_ID, f"🔔 Запись! User: {cid}\nКод: {code}\nКомната: {u.get('room_choice','')}")
+            max_send_message(ADMIN_ID, f"🔔 Запись! User: {cid}\nКод: {code}\nКомната: {u.get('room_choice','')}")
         return
 
     if data.startswith("slot_"):
@@ -503,7 +478,7 @@ def handle_callback(cid, data, users):
         u["booked_slot"] = slot
         u["state"] = "confirmed"
         save_users(users)
-        max_api.send_message(cid, f"✅ Забронировала: <b>{slot}</b>.\nСсылка на Zoom придёт за 30 минут. Жду встречи! 💫")
+        max_send_message(cid, f"✅ Забронировала: <b>{slot}</b>.\nСсылка на Zoom придёт за 30 минут. Жду встречи! 💫")
         return
 
 # ==================== WEBHOOK ====================
@@ -511,41 +486,37 @@ def handle_callback(cid, data, users):
 def webhook():
     try:
         data = request.get_json(force=True)
-        logger.info(f"Webhook received: {json.dumps(data, ensure_ascii=False)[:1000]}")
-
         users = load_users()
-        update = max_api.parse_update(data)
+        update = parse_max_update(data)
 
         if not update:
-            logger.warning("Не удалось распознать формат webhook. Сохраняю в лог для анализа.")
-            with open("unknown_webhooks.jsonl", "a", encoding="utf-8") as f:
-                f.write(json.dumps(data, ensure_ascii=False) + "\n")
-            return jsonify({"status": "unknown_format"}), 200
+            logger.warning(f"Неизвестный формат: {json.dumps(data, ensure_ascii=False)[:500]}")
+            return jsonify({"status": "unknown"}), 200
 
         cid = update["chat_id"]
 
         if update["type"] == "callback":
-            handle_callback(cid, update["data"], users)
-            return jsonify({"ok": True})
+            handle_callback(cid, update["data"], users, update.get("callback_id"))
+            return jsonify({"ok": True}), 200
 
-        if update["type"] == "message":
+        if update["type"] in ["message", "bot_started"]:
             text = update.get("text", "")
             u = get_user(users, cid)
 
             if text.lower() in ["/start", "дом", "начать", "start", "ключ"]:
                 handle_start(cid, users)
-                return jsonify({"ok": True})
+                return jsonify({"ok": True}), 200
 
             if u.get("state") == "booked" and text:
                 u["custom_slot"] = text
                 save_users(users)
-                max_api.send_message(cid, f"✅ Записала: <b>{text}</b>. Ссылка придёт за 30 минут. Жду! 💫")
-                return jsonify({"ok": True})
+                max_send_message(cid, f"✅ Записала: <b>{text}</b>. Ссылка придёт за 30 минут. Жду! 💫")
+                return jsonify({"ok": True}), 200
 
             handle_start(cid, users)
-            return jsonify({"ok": True})
+            return jsonify({"ok": True}), 200
 
-        return jsonify({"ok": True})
+        return jsonify({"ok": True}), 200
 
     except Exception as e:
         logger.error(f"Webhook error: {e}")
@@ -557,5 +528,12 @@ def index():
 
 # ==================== ЗАПУСК ====================
 if __name__ == "__main__":
+    # При старте подписываем webhook (если URL известен)
+    render_url = os.environ.get("RENDER_EXTERNAL_URL", "")
+    if render_url and MAX_BOT_TOKEN:
+        webhook_url = f"{render_url.rstrip('/')}{WEBHOOK_PATH}"
+        logger.info(f"Подписка на webhook: {webhook_url}")
+        subscribe_webhook(webhook_url)
+
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
