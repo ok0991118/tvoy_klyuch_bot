@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Бот-воронка «Твой ключ на чердаке»
-Игропрактик: Наташа Лылькина
+Бот-воронка «Твой ключ на чердаке» для Наташи Люлькиной
 Платформа: Max (max.ru)
+Версия: 2.0 — адаптирован под Max API
 """
 
 import os
@@ -13,11 +13,23 @@ import requests
 from flask import Flask, request, jsonify
 from datetime import datetime
 
-# ==================== КОНФИГ ====================
+# ==================== КОНФИГУРАЦИЯ ====================
 MAX_BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "")
-ADMIN_ID = os.getenv("ADMIN_ID", "")  # ID Наташи для уведомлений
+ADMIN_ID = os.getenv("ADMIN_ID", "")
 WEBHOOK_PATH = "/webhook"
 DATA_FILE = "users_state.json"
+
+# === НАСТРОЙКА API MAX ===
+# В личном кабинете Max (business.max.ru или dev.max.ru) найди:
+# 1. Базовый URL API (обычно https://api.max.ru/bot/v1/ или https://api.bot.max.ru/)
+# 2. Формат отправки сообщений
+# 3. Как передавать токен (в заголовке Authorization: Bearer TOKEN или в параметре ?token=)
+#
+# Если неизвестно — оставь пустым, бот будет логировать входящие запросы,
+# чтобы ты могла увидеть формат и подстроить код.
+
+MAX_API_BASE = os.getenv("MAX_API_BASE", "https://api.max.ru/bot/v1")
+MAX_AUTH_HEADER = os.getenv("MAX_AUTH_HEADER", "Authorization")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,19 +60,126 @@ def get_user(users, uid):
         "room_choice": ""
     })
 
-# ==================== API MAX ====================
-def send_message(chat_id, text, buttons=None):
-    url = f"https://api.max.ru/bot{MAX_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-    if buttons:
-        payload["reply_markup"] = {"inline_keyboard": buttons}
-    try:
-        r = requests.post(url, json=payload, timeout=10)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        logger.error(f"Send error: {e}")
+# ==================== MAX API АДАПТЕР ====================
+class MaxAdapter:
+    """Адаптер для API Max. Поддерживает автоопределение формата."""
+
+    def __init__(self, token, api_base, auth_header):
+        self.token = token
+        self.api_base = api_base.rstrip("/")
+        self.auth_header = auth_header
+        self.headers = {
+            "Content-Type": "application/json"
+        }
+        if auth_header.lower() == "authorization":
+            self.headers["Authorization"] = f"Bearer {token}"
+        elif auth_header.lower() == "x-bot-token":
+            self.headers["X-Bot-Token"] = token
+
+    def send_message(self, chat_id, text, buttons=None):
+        """Отправка сообщения. Автоматически пробует 2 формата."""
+
+        # Формат 1: Telegram-like (max использует похожий JSON)
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML"
+        }
+        if buttons:
+            payload["reply_markup"] = {"inline_keyboard": buttons}
+
+        # Пробуем разные endpoint'ы
+        endpoints = [
+            f"{self.api_base}/messages/sendText",
+            f"{self.api_base}/sendMessage",
+            f"https://api.max.ru/bot{self.token}/sendMessage",
+        ]
+
+        for url in endpoints:
+            try:
+                if "api.max.ru/bot" in url and self.token:
+                    # Telegram-совместимый формат (некоторые платформы поддерживают)
+                    r = requests.post(url, json=payload, headers=self.headers, timeout=10)
+                else:
+                    # Нативный Max формат
+                    data = {
+                        "token": self.token,
+                        "chatId": chat_id,
+                        "text": text
+                    }
+                    if buttons:
+                        data["inlineKeyboardMarkup"] = buttons
+                    r = requests.post(url, json=data, headers=self.headers, timeout=10)
+
+                if r.status_code == 200:
+                    logger.info(f"Сообщение отправлено через {url}")
+                    return r.json()
+            except Exception as e:
+                logger.warning(f"Не удалось отправить через {url}: {e}")
+                continue
+
+        logger.error("Все endpoint'ы для отправки сообщений недоступны")
         return None
+
+    def parse_update(self, data):
+        """Парсит входящий webhook. Поддерживает несколько форматов."""
+        logger.info(f"Входящий webhook: {json.dumps(data, ensure_ascii=False)[:500]}")
+
+        # Формат 1: Telegram-like (message / callback_query)
+        if "message" in data:
+            msg = data["message"]
+            return {
+                "type": "message",
+                "chat_id": msg.get("chat", {}).get("id"),
+                "text": msg.get("text", ""),
+                "user_id": msg.get("from", {}).get("id")
+            }
+
+        if "callback_query" in data:
+            cb = data["callback_query"]
+            return {
+                "type": "callback",
+                "chat_id": cb.get("message", {}).get("chat", {}).get("id"),
+                "data": cb.get("data", ""),
+                "user_id": cb.get("from", {}).get("id")
+            }
+
+        # Формат 2: ICQ/Max нативный (event + payload)
+        event = data.get("event", "")
+        payload = data.get("payload", {})
+
+        if event == "newMessage":
+            chat = payload.get("chat", {})
+            sender = payload.get("from", {})
+            return {
+                "type": "message",
+                "chat_id": chat.get("chatId") or chat.get("id"),
+                "text": payload.get("text", ""),
+                "user_id": sender.get("userId") or sender.get("id")
+            }
+
+        if event == "callbackQuery":
+            return {
+                "type": "callback",
+                "chat_id": payload.get("chat", {}).get("chatId"),
+                "data": payload.get("callbackData", ""),
+                "user_id": payload.get("from", {}).get("userId")
+            }
+
+        # Формат 3: Упрощённый (chatId, text на верхнем уровне)
+        if "chatId" in data or "chat_id" in data:
+            return {
+                "type": "message",
+                "chat_id": data.get("chatId") or data.get("chat_id"),
+                "text": data.get("text", ""),
+                "user_id": data.get("userId") or data.get("user_id")
+            }
+
+        logger.warning(f"Неизвестный формат webhook: {data}")
+        return None
+
+# Инициализация адаптера
+max_api = MaxAdapter(MAX_BOT_TOKEN, MAX_API_BASE, MAX_AUTH_HEADER)
 
 # ==================== 27 РЕЗУЛЬТАТОВ ====================
 RESULTS = {
@@ -201,7 +320,7 @@ RESULTS = {
 <b>Синтез:</b> Ты так долго была «как надо», что забыла, какая «как есть». Ты боишься пустоты в центре. Но зеркало на чердаке не покажет пустоту. Оно покажет <i>тень</i>. Твою. Ту, которая знает все ответы, но молчит, потому что ей не разрешали говорить. Достань её. Она не пустая. Она — полная.""",
 }
 
-# Тексты воронки
+# ==================== ТЕКСТЫ ВОРОНКИ ====================
 WELCOME = """Привет! Я Наташа 👋
 
 Спасибо, что решилась заглянуть. Сейчас мы сделаем 3-минутный <b>аварийный обход твоего Дома Души</b>.
@@ -299,76 +418,33 @@ DIAG_TEXTS = {
 
 BOOK_BTN = [[{"text": "📅 Забронировать диагностику", "callback_data": "book_diagnostic"}]]
 
-# Follow-ups
-FU1 = """Привет! Это Наташа 👋
-
-Я посмотрела твой обход Дома Души. И мне есть что сказать.
-
-Ты выбрала: {code}. Это очень характерно для женщин, которые чувствуют, что «что-то не так», но не могут понять — что именно.
-
-И вот что важно: то, что ты увидела в боте — это только <b>фасад</b>. За фасадом всегда есть <b>пристройка</b>. Та часть дома, которую ты не показываешь никому. Даже себе.
-
-В полной игре «Дом Души» мы заходим в эту пристройку. И знаешь, что там обычно? <b>Облегчение.</b> Потому что наконец-то можно перестать притворяться.
-
-У тебя осталось место на бесплатной диагностике. Нажми, чтобы выбрать время 👇"""
-
-FU2 = """Вчера Катя прошла полный обход Дома Души.
-
-Она тоже чувствовала, что живёт «как надо», а не «как хочу». Сказала: «Я 10 лет лечилась от тревожности, а оказалось — мне просто никто не разрешал быть маленькой».
-
-Сегодня она написала: «Я впервые заказала себе торт. И съела его без вины. Это был не жор. Это был праздник» 🎂
-
-Игра не волшебная таблетка. Но она — <b>фонарик</b>, который ты забираешь с собой. И после него темнота уже не кажется бесконечной.
-
-Запишись на диагностику. Посмотрим в твои закрытые комнаты 👇"""
-
-FU3 = """3 вещи, которые ты не узнаешь из постов и книг:
-
-1️⃣ <b>Почему терапия не помогает с «домом».</b> Терапия работает с умом. А дом — в подсознании. В игре ты не расскажешь историю. Ты её <b>переживёшь</b>. И тело запомнит другое ощущение.
-
-2️⃣ <b>Почему сила воли — ловушка.</b> Каждый раз, когда ты «борешься» с собой, ты борешься со своим домом. С его фундаментом. А фундамент не бьют. Его меняют. Игровая метафора позволяет это сделать без насилия.
-
-3️⃣ <b>Почему группа важнее, чем кажется.</b> Когда ты видишь, как другая женщина открывает свою комнату — ты узнаёшь свою. Это зеркало, которого нет в индивидуальной работе.
-
-Завтра я провожу последние бесплатные диагностики на этой неделе. Если твой дом скрипит — приходи. Я покажу, где именно дверь заклинило 👇"""
-
-FU3_URGENT = """⚠️ Твой бонус сгорает через 4 часа.
-
-Если ты запишешься на диагностику сегодня — я пришлю тебе <b>персональную метафорическую карту «Ключ от чердака»</b> в подарок.
-
-Это не красивая картинка. Это образ, с которым ты будешь работать после игры.
-
-После марафона «Ты сможешь» я поняла: людям не нужна ещё одна диета. Им нужен <b>ключ</b>. Который подходит именно к их двери.
-
-Этот ключ — в твоей закрытой комнате. Давай откроем 👇"""
-
-# ==================== ЛОГИКА ====================
+# ==================== ЛОГИКА БОТА ====================
 def handle_start(cid, users):
     u = get_user(users, cid)
     u["state"] = "q1"
     save_users(users)
-    send_message(cid, WELCOME, buttons=[[{"text": "🚪 Открыть дверь", "callback_data": "start_quest"}]])
+    max_api.send_message(cid, WELCOME, buttons=[[{"text": "🚪 Открыть дверь", "callback_data": "start_quest"}]])
 
 def handle_callback(cid, data, users):
     u = get_user(users, cid)
     st = u.get("state", "start")
 
     if data == "start_quest" and st == "q1":
-        send_message(cid, Q1, buttons=Q1_BTNS)
+        max_api.send_message(cid, Q1, buttons=Q1_BTNS)
         return
 
     if st == "q1" and data in "ABC":
         u["answers"]["q1"] = data
         u["state"] = "q2"
         save_users(users)
-        send_message(cid, Q2, buttons=Q2_BTNS)
+        max_api.send_message(cid, Q2, buttons=Q2_BTNS)
         return
 
     if st == "q2" and data in "ABC":
         u["answers"]["q2"] = data
         u["state"] = "q3"
         save_users(users)
-        send_message(cid, Q3, buttons=Q3_BTNS)
+        max_api.send_message(cid, Q3, buttons=Q3_BTNS)
         return
 
     if st == "q3" and data in "ABC":
@@ -379,11 +455,11 @@ def handle_callback(cid, data, users):
         u["result_time"] = datetime.now().isoformat()
         save_users(users)
 
-        send_message(cid, RESULTS.get(code, RESULTS["AAA"]))
+        max_api.send_message(cid, RESULTS.get(code, RESULTS["AAA"]))
         import time; time.sleep(2)
-        send_message(cid, AFTER_RESULT)
+        max_api.send_message(cid, AFTER_RESULT)
         time.sleep(2)
-        send_message(cid, ROOM_CHOICE, buttons=ROOM_BTNS)
+        max_api.send_message(cid, ROOM_CHOICE, buttons=ROOM_BTNS)
         u["state"] = "room"
         save_users(users)
         return
@@ -392,13 +468,14 @@ def handle_callback(cid, data, users):
         u["room_choice"] = data
         u["state"] = "booking"
         save_users(users)
-        send_message(cid, DIAG_TEXTS.get(data, DIAG_TEXTS["room_both"]), buttons=BOOK_BTN)
+        max_api.send_message(cid, DIAG_TEXTS.get(data, DIAG_TEXTS["room_both"]), buttons=BOOK_BTN)
         return
 
     if data == "book_diagnostic":
         u["diagnostic_booked"] = True
         u["state"] = "booked"
         save_users(users)
+
         txt = """🗓 <b>Запись на диагностику</b>
 
 Выбери удобное время. Я провожу диагностики:
@@ -414,9 +491,10 @@ def handle_callback(cid, data, users):
             [{"text": "Ср 16:00", "callback_data": "slot_wed_16"}],
             [{"text": "Чт 18:00", "callback_data": "slot_thu_18"}]
         ]
-        send_message(cid, txt, buttons=slots)
+        max_api.send_message(cid, txt, buttons=slots)
+
         if ADMIN_ID:
-            send_message(ADMIN_ID, f"🔔 Запись! User: {cid}\nКод: {code}\nКомната: {u.get('room_choice','')}")
+            max_api.send_message(ADMIN_ID, f"🔔 Запись! User: {cid}\nКод: {code}\nКомната: {u.get('room_choice','')}")
         return
 
     if data.startswith("slot_"):
@@ -425,7 +503,7 @@ def handle_callback(cid, data, users):
         u["booked_slot"] = slot
         u["state"] = "confirmed"
         save_users(users)
-        send_message(cid, f"✅ Забронировала: <b>{slot}</b>.\nСсылка на Zoom придёт за 30 минут. Жду встречи! 💫")
+        max_api.send_message(cid, f"✅ Забронировала: <b>{slot}</b>.\nСсылка на Zoom придёт за 30 минут. Жду встречи! 💫")
         return
 
 # ==================== WEBHOOK ====================
@@ -433,18 +511,25 @@ def handle_callback(cid, data, users):
 def webhook():
     try:
         data = request.get_json(force=True)
-        users = load_users()
+        logger.info(f"Webhook received: {json.dumps(data, ensure_ascii=False)[:1000]}")
 
-        if "callback_query" in data:
-            cb = data["callback_query"]
-            cid = cb["message"]["chat"]["id"]
-            handle_callback(cid, cb["data"], users)
+        users = load_users()
+        update = max_api.parse_update(data)
+
+        if not update:
+            logger.warning("Не удалось распознать формат webhook. Сохраняю в лог для анализа.")
+            with open("unknown_webhooks.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(data, ensure_ascii=False) + "\n")
+            return jsonify({"status": "unknown_format"}), 200
+
+        cid = update["chat_id"]
+
+        if update["type"] == "callback":
+            handle_callback(cid, update["data"], users)
             return jsonify({"ok": True})
 
-        if "message" in data:
-            msg = data["message"]
-            cid = msg["chat"]["id"]
-            text = msg.get("text", "")
+        if update["type"] == "message":
+            text = update.get("text", "")
             u = get_user(users, cid)
 
             if text.lower() in ["/start", "дом", "начать", "start", "ключ"]:
@@ -454,13 +539,14 @@ def webhook():
             if u.get("state") == "booked" and text:
                 u["custom_slot"] = text
                 save_users(users)
-                send_message(cid, f"✅ Записала: <b>{text}</b>. Ссылка придёт за 30 минут. Жду! 💫")
+                max_api.send_message(cid, f"✅ Записала: <b>{text}</b>. Ссылка придёт за 30 минут. Жду! 💫")
                 return jsonify({"ok": True})
 
             handle_start(cid, users)
             return jsonify({"ok": True})
 
         return jsonify({"ok": True})
+
     except Exception as e:
         logger.error(f"Webhook error: {e}")
         return jsonify({"error": str(e)}), 500
@@ -469,5 +555,7 @@ def webhook():
 def index():
     return "Твой ключ на чердаке — работает ✅"
 
+# ==================== ЗАПУСК ====================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
