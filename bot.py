@@ -45,7 +45,7 @@ AUDIO_URLS = {
     "room_body": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_body.mp3",
     "room_relations": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_relations.mp3",
     "room_both": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_both.mp3",
-    "booking_confirmed": "https://storage.yandexcloud.net/tvoy-klyuch-bot/Podtverzhdenie%20zapisi.mp3",
+    "booking_confirmed": "https://storage.yandexcloud.net/tvoy-klyuch-bot/Podtverzhdenie-zapisi.mp3",
 }
 
 def load_audio_tokens():
