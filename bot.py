@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Бот-воронка «Твой ключ на чердаке» — Max API v2
-Голосовые: кэширование токенов, ленивая загрузка
++ Этап выбора дома (эмоциональное состояние)
 """
 
 import os
@@ -22,9 +22,13 @@ ADMIN_ID = os.getenv("ADMIN_ID", "")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 WEBHOOK_PATH = "/webhook"
 DATA_FILE = "users_state.json"
-TOKENS_FILE = "audio_tokens.json"
+TOKENS_FILE = "upload_tokens.json"
 
 API_BASE = "https://platform-api2.max.ru"
+
+# ==================== ЗАГРУЗИ СЮДА ССЫЛКУ НА КАРТИНКУ ====================
+HOUSE_IMAGE_URL = "https://storage.yandexcloud.net/tvoy-klyuch-bot/4doma.jpg"
+# =======================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -35,41 +39,40 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-# ==================== ГОЛОСОВЫЕ ====================
+# ==================== МЕДИА ====================
 AUDIO_URLS = {
     "after_result": "https://storage.yandexcloud.net/tvoy-klyuch-bot/AFTER_RESULT.mp3",
-    "room_body": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_body.mp3",
-    "room_relations": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_relations.mp3",
-    "room_both": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_both.mp3",
-    "booking_confirmed": "https://storage.yandexcloud.net/tvoy-klyuch-bot/Podtverzhdenie-zapisi.mp3",
+    "room_body": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_body.wav",
+    "room_relations": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_relations.wav",
+    "room_both": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_both.wav",
+    "booking_confirmed": "https://storage.yandexcloud.net/tvoy-klyuch-bot/Podtverzhdenie%20zapisi.wav",
 }
 
-def load_audio_tokens():
+def load_tokens_cache():
     if os.path.exists(TOKENS_FILE):
         with open(TOKENS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     return {}
 
-def save_audio_tokens(tokens):
+def save_tokens_cache(tokens):
     with open(TOKENS_FILE, "w", encoding="utf-8") as f:
         json.dump(tokens, f, ensure_ascii=False, indent=2)
 
-def get_audio_token(audio_url):
-    """Загружает аудио в Max и возвращает токен (с кэшированием)."""
-    tokens = load_audio_tokens()
-    if audio_url in tokens:
-        return tokens[audio_url]
+def get_upload_token(media_url, upload_type="audio"):
+    """Универсальная загрузка файла в Max (audio/image). Возвращает токен."""
+    tokens = load_tokens_cache()
+    cache_key = f"{upload_type}:{media_url}"
+    if cache_key in tokens:
+        return tokens[cache_key]
 
-    logger.info(f"Загружаю аудио в Max: {audio_url}")
+    logger.info(f"Загружаю {upload_type} в Max: {media_url}")
     try:
-        # 1. Скачиваем файл
-        r = requests.get(audio_url, timeout=30, verify=False)
+        r = requests.get(media_url, timeout=30, verify=False)
         r.raise_for_status()
         file_bytes = r.content
-        filename = unquote(audio_url.split("/")[-1].split("?")[0]) or "audio.mp3"
+        filename = unquote(media_url.split("/")[-1].split("?")[0]) or "file"
 
-        # 2. Запрашиваем URL для загрузки
-        resp = requests.post(f"{API_BASE}/uploads?type=audio", headers=HEADERS, timeout=10, verify=False)
+        resp = requests.post(f"{API_BASE}/uploads?type={upload_type}", headers=HEADERS, timeout=10, verify=False)
         resp.raise_for_status()
         upload_data = resp.json()
         upload_url = upload_data.get("url")
@@ -78,12 +81,10 @@ def get_audio_token(audio_url):
         if not upload_url:
             raise ValueError("No upload_url in /uploads response")
 
-        # 3. Загружаем файл multipart/form-data, поле 'data'
-        files = {"data": (filename, file_bytes, "audio/mpeg")}
+        files = {"data": (filename, file_bytes, "application/octet-stream")}
         up_resp = requests.post(upload_url, files=files, timeout=30, verify=False)
         logger.info(f"Upload response: {up_resp.status_code} | {up_resp.text[:200]}")
 
-        # Если токена не было на шаге 2, пробуем достать из ответа загрузки
         if not token and up_resp.status_code == 200:
             try:
                 token = up_resp.json().get("token")
@@ -91,49 +92,40 @@ def get_audio_token(audio_url):
                 pass
 
         if not token:
-            # Fallback: некоторые реализации возвращают token внутри upload_url
             from urllib.parse import parse_qs, urlparse
             qs = parse_qs(urlparse(upload_url).query)
-            if "token" in qs:
-                token = qs["token"][0]
-            elif "uuid" in qs:
-                token = qs["uuid"][0]
+            token = qs.get("token", [None])[0] or qs.get("uuid", [None])[0]
 
         if not token:
             raise ValueError("Could not obtain upload token")
 
-        # 4. Даём серверу время на обработку
         time.sleep(2)
-
-        tokens[audio_url] = token
-        save_audio_tokens(tokens)
-        logger.info(f"Аудио загружено, token: {token[:20]}...")
+        tokens[cache_key] = token
+        save_tokens_cache(tokens)
+        logger.info(f"{upload_type} загружен, token: {token[:20]}...")
         return token
 
     except Exception as e:
-        logger.error(f"Ошибка загрузки аудио: {e}")
+        logger.error(f"Ошибка загрузки {upload_type}: {e}")
         return None
 
-def max_send_audio(chat_id, token, user_id=None):
-    """Отправка аудио-вложения по токену Max."""
-    if not token:
-        return None
+def max_send_media_by_token(chat_id, token, media_type, user_id=None):
     target = user_id or chat_id
     param = "user_id" if user_id else "chat_id"
     url = f"{API_BASE}/messages?{param}={target}"
     payload = {
         "attachments": [{
-            "type": "audio",
+            "type": media_type,
             "payload": {"token": token}
         }]
     }
     try:
         r = requests.post(url, headers=HEADERS, json=payload, timeout=10, verify=False)
         r.raise_for_status()
-        logger.info(f"Аудио отправлено: {r.status_code}")
+        logger.info(f"{media_type} отправлено: {r.status_code}")
         return r.json()
     except Exception as e:
-        logger.error(f"Ошибка отправки аудио: {e}")
+        logger.error(f"Ошибка отправки {media_type}: {e}")
         return None
 
 # ==================== ХРАНИЛИЩЕ ====================
@@ -268,7 +260,29 @@ def parse_max_update(data):
     return None
 
 # ==================== ТЕКСТЫ ====================
-WELCOME = "Привет! Я Наташа 👋\n\nСпасибо, что решилась заглянуть. Сейчас мы сделаем 3-минутный обход твоего Дома Души.\n\nЭто не тест. Это игра. Отвечай интуитивно, не думая.\n\nГотова?"
+WELCOME = "Привет! Я Наташа 👋\n\nСпасибо, что решилась заглянуть. Сейчас мы сделаем 3-минутный обход твоего Дома Души.\n\nЭто не тест. Это игра. Отвечай интуитивно, не думая.\n\nНо для начала я предлагаю тебе посмотреть, в каком же состоянии ты сейчас пребываешь. Порой в нас так много чувств, что мы и сами толком не понимаем, в каком состоянии находимся. Эмоции вспыхивают и гаснут, иногда это происходит так быстро, что мы даже не успеваем их отследить. Но сейчас ты можешь узнать, что на самом деле чувствуешь прямо сейчас.\n\nГотова?"
+
+INTRO_BTN = [[{"type": "callback", "text": "Да, я готова", "payload": "ready_intro"}]]
+
+HOUSE_TEXT = "Посмотри на картинку и выбери дом, который тебе больше всего приглянулся. Долго размышлять не надо, выбирай тот, на который изначально обратила внимание."
+
+HOUSE_BTNS = [
+    [{"type": "callback", "text": "Дом 1", "payload": "house_1"}],
+    [{"type": "callback", "text": "Дом 2", "payload": "house_2"}],
+    [{"type": "callback", "text": "Дом 3", "payload": "house_3"}],
+    [{"type": "callback", "text": "Дом 4", "payload": "house_4"}]
+]
+
+HOUSE_RESULTS = {
+    "1": "Похоже, в настоящее время тебе больше всего хочется покоя и одиночества. Тебе необходимо побыть в уединении, чтобы восстановить силы.\n\nЭто нормальное состояние, особенно, если в последнее время ты проходила через трудный этап жизни. Каждому человеку порой нужно побыть одному.",
+    "2": "Вероятно, сейчас ты испытываешь ощущение возрождения. Позади не самый приятный этап и ты начинаешь чувствовать, как возвращаются силы.",
+    "3": "Этот дом выбирают люди, которые нуждаются в передышке. Ты устала, вымотана и можешь находиться в подавленном состоянии. Вероятно, стоит подумать о том, чтобы взять перерыв.",
+    "4": "Этот выбор делают люди, которые переживают опустошение. Ты могла что-то потерять или к тебе пришло осознание, что-то, на что ты надеялась, не сбудется. Тебе нужно время, чтобы восстановить силы."
+}
+
+PRE_QUEST_TEXT = "Теперь я вижу твое внутреннее состояние. Я здесь для того, чтобы поддержать тебя и помочь отследить, какие события или люди в твоей жизни оказывают на тебя влияние, какой душевный отклик ты на это имеешь. И, конечно, вместе мы можем поработать над тем, чтобы усилить те реакции, которые идут во благо, и ослабить те, что истощают.\n\nА теперь мы приступим к 3-минутному осмотру твоего дома и узнаем, что сейчас больше всего тебя волнует."
+
+PRE_QUEST_BTN = [[{"type": "callback", "text": "Открыть дверь", "payload": "start_quest"}]]
 
 Q1 = "🚪 Комната 1: Фундамент\n\nПредставь: ты стоишь перед своим домом. Смотришь на фундамент.\n\nЧто чувствуешь?"
 Q1_BTNS = [
@@ -342,9 +356,9 @@ RESULTS = {
 # ==================== ЛОГИКА БОТА ====================
 def handle_start(cid, users, user_id=None):
     u = get_user(users, cid)
-    u["state"] = "q1"
+    u["state"] = "intro"
     save_users(users)
-    max_send_with_buttons(cid, WELCOME, [[{"type": "callback", "text": "Открыть дверь", "payload": "start_quest"}]], user_id=user_id)
+    max_send_with_buttons(cid, WELCOME, INTRO_BTN, user_id=user_id)
 
 def handle_callback(cid, data, users, callback_id=None, user_id=None):
     if callback_id:
@@ -353,10 +367,40 @@ def handle_callback(cid, data, users, callback_id=None, user_id=None):
     u = get_user(users, cid)
     st = u.get("state", "start")
 
-    if data == "start_quest" and st == "q1":
+    # === НОВЫЙ СЦЕНАРИЙ: ВЫБОР ДОМА ===
+    if data == "ready_intro" and st == "intro":
+        u["state"] = "house_choice"
+        save_users(users)
+        # 1. Картинка
+        img_token = get_upload_token(HOUSE_IMAGE_URL, upload_type="image")
+        if img_token:
+            max_send_media_by_token(cid, img_token, "image", user_id=user_id)
+            time.sleep(1)
+        # 2. Текст с кнопками
+        max_send_with_buttons(cid, HOUSE_TEXT, HOUSE_BTNS, user_id=user_id)
+        return
+
+    if st == "house_choice" and data.startswith("house_"):
+        house_num = data.split("_")[1]
+        u["state"] = "house_result"
+        u["house_choice"] = house_num
+        save_users(users)
+        # Результат выбора дома
+        max_send_text(cid, HOUSE_RESULTS.get(house_num, ""), user_id=user_id)
+        time.sleep(5)
+        # Переход к основному квесту
+        u["state"] = "pre_quest"
+        save_users(users)
+        max_send_with_buttons(cid, PRE_QUEST_TEXT, PRE_QUEST_BTN, user_id=user_id)
+        return
+
+    if st == "pre_quest" and data == "start_quest":
+        u["state"] = "q1"
+        save_users(users)
         max_send_with_buttons(cid, Q1, Q1_BTNS, user_id=user_id)
         return
 
+    # === СТАРЫЙ СЦЕНАРИЙ (Q1-Q3) ===
     if st == "q1" and data in "ABC":
         u["answers"]["q1"] = data
         u["state"] = "q2"
@@ -384,9 +428,9 @@ def handle_callback(cid, data, users, callback_id=None, user_id=None):
         time.sleep(2)
 
         # 2. Голосовое "после результата"
-        token = get_audio_token(AUDIO_URLS["after_result"])
+        token = get_upload_token(AUDIO_URLS["after_result"], upload_type="audio")
         if token:
-            max_send_audio(cid, token, user_id=user_id)
+            max_send_media_by_token(cid, token, "audio", user_id=user_id)
             time.sleep(1)
 
         # 3. Текст AFTER_RESULT
@@ -408,10 +452,10 @@ def handle_callback(cid, data, users, callback_id=None, user_id=None):
         max_send_with_buttons(cid, DIAG_TEXTS.get(data, DIAG_TEXTS["room_both"]), BOOK_BTN, user_id=user_id)
 
         # Голосовое для выбранной комнаты
-        token = get_audio_token(AUDIO_URLS.get(data))
+        token = get_upload_token(AUDIO_URLS.get(data), upload_type="audio")
         if token:
             time.sleep(2)
-            max_send_audio(cid, token, user_id=user_id)
+            max_send_media_by_token(cid, token, "audio", user_id=user_id)
         return
 
     if data == "book_diagnostic":
@@ -442,11 +486,11 @@ def handle_callback(cid, data, users, callback_id=None, user_id=None):
         # Текст подтверждения
         max_send_text(cid, f"✅ Забронировала: {slot}.\nСсылка на Zoom придёт за 30 минут. Жду встречи! 💫", user_id=user_id)
 
-        # Голосовое подтверждение
-        token = get_audio_token(AUDIO_URLS["booking_confirmed"])
+        # Голосовое подтверждения
+        token = get_upload_token(AUDIO_URLS["booking_confirmed"], upload_type="audio")
         if token:
             time.sleep(1)
-            max_send_audio(cid, token, user_id=user_id)
+            max_send_media_by_token(cid, token, "audio", user_id=user_id)
         return
 
 # ==================== WEBHOOK ====================
