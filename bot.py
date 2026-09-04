@@ -42,10 +42,10 @@ HEADERS = {
 # ==================== МЕДИА ====================
 AUDIO_URLS = {
     "after_result": "https://storage.yandexcloud.net/tvoy-klyuch-bot/AFTER_RESULT.mp3",
-    "room_body": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_body.wav",
-    "room_relations": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_relations.wav",
-    "room_both": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_both.wav",
-    "booking_confirmed": "https://storage.yandexcloud.net/tvoy-klyuch-bot/Podtverzhdenie%20zapisi.wav",
+    "room_body": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_body.mp3",
+    "room_relations": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_relations.mp3",
+    "room_both": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_both.mp3",
+    "booking_confirmed": "https://storage.yandexcloud.net/tvoy-klyuch-bot/Podtverzhdenie%20zapisi.mp3",
 }
 
 def load_audio_tokens():
@@ -281,7 +281,7 @@ def parse_max_update(data):
     return None
 
 # ==================== ТЕКСТЫ ====================
-WELCOME = "Привет! Я Наташа 👋\n\nСпасибо, что решилась заглянуть. Сейчас мы сделаем 3-минутный обход твоего Дома Души.\n\nЭто не тест. Это игра. Отвечай интуитивно, не думая.\n\nНо для начала я предлагаю тебе посмотреть, в каком же состоянии ты сейчас пребываешь. Порой в нас так много чувств, что мы и сами толком не понимаем, в каком состоянии находимся. Эмоции вспыхивают и гаснут, иногда это происходит так быстро, что мы даже не успеваем их отследить. Но сейчас ты можешь узнать, что на самом деле чувствуешь прямо сейчас.\n\nГотова?"
+WELCOME = "Привет! Я Наташа 👋\n\nСпасибо, что решилась заглянуть♥ Сейчас мы сделаем 3-минутный обход твоего Дома Души.\n\nЭто не тест. Это игра. Отвечай интуитивно, не думая.\n\nНо для начала я предлагаю тебе посмотреть, в каком же состоянии ты сейчас пребываешь. Порой в нас так много чувств, что мы и сами толком не понимаем, в каком состоянии находимся. Эмоции вспыхивают и гаснут, иногда это происходит так быстро, что мы даже не успеваем их отследить. Но сейчас ты можешь узнать, что на самом деле чувствуешь прямо сейчас.\n\nГотова?"
 
 INTRO_BTN = [[{"type": "callback", "text": "Да, я готова", "payload": "ready_intro"}]]
 
