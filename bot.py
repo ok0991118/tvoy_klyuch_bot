@@ -28,9 +28,9 @@ DATA_FILE = "users_state.json"
 AUDIO_TOKENS_FILE = "audio_tokens.json"
 
 # ==================== ПЛАНЕРКА ====================
-PLANERKA_DIAGNOSTIC_URL = os.getenv("PLANERKA_DIAGNOSTIC_URL", "https://planerka.app/natasha/diagnostic")
-PLANERKA_INDIVIDUAL_URL = os.getenv("PLANERKA_INDIVIDUAL_URL", "https://planerka.app/natasha/individual")
-PLANERKA_GROUP_URL = os.getenv("PLANERKA_GROUP_URL", "https://planerka.app/natasha/group")
+PLANERKA_DIAGNOSTIC_URL = os.getenv("PLANERKA_DIAGNOSTIC_URL", "https://planerka.app/natalya-lyulkina-x9g3qt/30min")
+PLANERKA_INDIVIDUAL_URL = os.getenv("PLANERKA_INDIVIDUAL_URL", "https://planerka.app/natalya-lyulkina-x9g3qt/individualnaya-igra")
+PLANERKA_GROUP_URL = os.getenv("PLANERKA_GROUP_URL", "https://planerka.app/natalya-lyulkina-x9g3qt/gruppovaya-igra")
 
 API_BASE = "https://platform-api2.max.ru"
 
