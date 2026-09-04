@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Бот-воронка «Твой ключ на чердаке» — тестовая версия
-Max API: chat_id в query param, body — только text/attachments
+Бот-воронка «Твой ключ на чердаке» — Max API v2
+Исправления: callback answer, user_id для личных диалогов, короткие кнопки, автоподписка
 """
 
 import os
@@ -14,15 +14,15 @@ from datetime import datetime
 import urllib3
 import time
 
-# Отключаем предупреждения SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 MAX_BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "")
 ADMIN_ID = os.getenv("ADMIN_ID", "")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 WEBHOOK_PATH = "/webhook"
 DATA_FILE = "users_state.json"
 
-API_MESSAGES = "https://platform-api2.max.ru"
+API_BASE = "https://platform-api2.max.ru"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -55,10 +55,39 @@ def get_user(users, uid):
         "room_choice": ""
     })
 
-# ==================== ОТПРАВКА (chat_id в query) ====================
-def max_send_text(chat_id, text):
-    """Отправка plain text: chat_id в URL, text в body"""
-    url = f"{API_MESSAGES}/messages?chat_id={chat_id}"
+# ==================== ПОДПИСКА WEBHOOK ====================
+def subscribe_webhook():
+    if not RENDER_EXTERNAL_URL:
+        logger.info("RENDER_EXTERNAL_URL не задан — автоподписка пропущена. Подпиши вручную через POST /subscriptions")
+        return
+    webhook_url = RENDER_EXTERNAL_URL.rstrip("/") + WEBHOOK_PATH
+    payload = {
+        "url": webhook_url,
+        "update_types": ["message_created", "bot_started", "message_callback"]
+    }
+    try:
+        r = requests.post(f"{API_BASE}/subscriptions", headers=HEADERS, json=payload, timeout=10, verify=False)
+        logger.info(f"Подписка webhook: {r.status_code} | {r.text[:300]}")
+    except Exception as e:
+        logger.error(f"Ошибка подписки webhook: {e}")
+
+# ==================== ОТПРАВКА ====================
+def max_answer_callback(callback_id):
+    """Обязательный ответ на callback — убирает спиннер с кнопки"""
+    if not callback_id:
+        return
+    url = f"{API_BASE}/answers?callback_id={callback_id}"
+    try:
+        r = requests.post(url, headers=HEADERS, json={}, timeout=10, verify=False)
+        logger.info(f"Answer callback {callback_id}: {r.status_code}")
+    except Exception as e:
+        logger.error(f"Answer callback error: {e}")
+
+def max_send_text(chat_id, text, user_id=None):
+    """Отправка текста. Для личных диалогов 1-на-1 лучше использовать user_id."""
+    target = user_id or chat_id
+    param = "user_id" if user_id else "chat_id"
+    url = f"{API_BASE}/messages?{param}={target}"
     payload = {"text": text}
     try:
         r = requests.post(url, headers=HEADERS, json=payload, timeout=10, verify=False)
@@ -69,9 +98,10 @@ def max_send_text(chat_id, text):
         logger.error(f"Ошибка отправки: {e}")
         return None
 
-def max_send_with_buttons(chat_id, text, buttons):
-    """Отправка с кнопками: chat_id в URL, text+attachments в body"""
-    url = f"{API_MESSAGES}/messages?chat_id={chat_id}"
+def max_send_with_buttons(chat_id, text, buttons, user_id=None):
+    target = user_id or chat_id
+    param = "user_id" if user_id else "chat_id"
+    url = f"{API_BASE}/messages?{param}={target}"
     payload = {
         "text": text,
         "attachments": [{
@@ -86,17 +116,23 @@ def max_send_with_buttons(chat_id, text, buttons):
         return r.json()
     except Exception as e:
         logger.error(f"Ошибка отправки с кнопками: {e}")
-        # Fallback: отправляем без кнопок
-        max_send_text(chat_id, text + "\n\n(Кнопки не поддерживаются, напиши ответ текстом)")
+        max_send_text(chat_id, text + "\n\n(Кнопки не поддерживаются, напиши ответ текстом)", user_id=user_id)
         return None
 
 # ==================== ПАРСИНГ ====================
 def parse_max_update(data):
-    logger.info(f"Webhook: {json.dumps(data, ensure_ascii=False)[:600]}")
-    update_type = data.get("update_type", "")
+    logger.info(f"Webhook raw: {json.dumps(data, ensure_ascii=False)[:800]}")
+
+    # Поддержка массива updates (для long polling) или одиночного объекта (webhook)
+    updates = data if isinstance(data, list) else [data]
+    if not updates:
+        return None
+
+    item = updates[0]
+    update_type = item.get("update_type", "")
 
     if update_type == "message_created":
-        msg = data.get("message", {})
+        msg = item.get("message", {})
         recipient = msg.get("recipient", {})
         sender = msg.get("sender", {})
         body = msg.get("body", {})
@@ -108,49 +144,52 @@ def parse_max_update(data):
         }
 
     if update_type == "message_callback":
-        cb = data.get("callback", {})
-        msg = data.get("message", {})
-        recipient = msg.get("recipient", {})
+        cb = item.get("callback", {})
+        msg = item.get("message", {})
+        recipient = msg.get("recipient", {}) if msg else {}
+        sender = item.get("sender", {})
+        # fallback: если chat_id нет в message, берём из callback или sender
+        chat_id = recipient.get("chat_id") or cb.get("chat_id") or sender.get("user_id")
         return {
             "type": "callback",
-            "chat_id": recipient.get("chat_id"),
+            "chat_id": chat_id,
             "data": cb.get("payload", ""),
-            "user_id": cb.get("from", {}).get("user_id"),
-            "callback_id": cb.get("id")
+            "user_id": sender.get("user_id") or cb.get("user", {}).get("user_id") or cb.get("from", {}).get("user_id"),
+            "callback_id": cb.get("callback_id")
         }
 
     if update_type == "bot_started":
         return {
             "type": "bot_started",
-            "chat_id": data.get("chat_id"),
-            "user_id": data.get("user_id"),
+            "chat_id": item.get("chat_id"),
+            "user_id": item.get("user_id"),
             "text": "/start"
         }
 
     return None
 
-# ==================== ТЕКСТЫ (БЕЗ HTML) ====================
+# ==================== ТЕКСТЫ ====================
 WELCOME = "Привет! Я Наташа 👋\n\nСпасибо, что решилась заглянуть. Сейчас мы сделаем 3-минутный обход твоего Дома Души.\n\nЭто не тест. Это игра. Отвечай интуитивно, не думая.\n\nГотова?"
 
 Q1 = "🚪 Комната 1: Фундамент\n\nПредставь: ты стоишь перед своим домом. Смотришь на фундамент.\n\nЧто чувствуешь?"
 Q1_BTNS = [
-    [{"type": "callback", "text": "Дом стоит крепко, но мне тесно", "payload": "A"}],
-    [{"type": "callback", "text": "Под домом пустота. Боюсь, что рухнет", "payload": "B"}],
-    [{"type": "callback", "text": "Не помню, когда строила. Достался по наследству", "payload": "C"}]
+    [{"type": "callback", "text": "Дом крепок, но тесно", "payload": "A"}],
+    [{"type": "callback", "text": "Под домом пустота", "payload": "B"}],
+    [{"type": "callback", "text": "Достался по наследству", "payload": "C"}]
 ]
 
 Q2 = "🪟 Комната 2: Окно\n\nЗагляни в окно. Что ты видишь?"
 Q2_BTNS = [
-    [{"type": "callback", "text": "Тарелку с едой. И вина: опять", "payload": "A"}],
-    [{"type": "callback", "text": "Пустое кресло. Или ссору. Или уход", "payload": "B"}],
-    [{"type": "callback", "text": "Счета, дела, список. И усталость", "payload": "C"}]
+    [{"type": "callback", "text": "Тарелка с едой и вином", "payload": "A"}],
+    [{"type": "callback", "text": "Пустое кресло или уход", "payload": "B"}],
+    [{"type": "callback", "text": "Счета, дела, усталость", "payload": "C"}]
 ]
 
 Q3 = "🏚️ Комната 3: Чердак\n\nТы на чердаке. В углу стоит коробка. Ты знаешь, что внутри. Но боишься открыть.\n\nЧто там?"
 Q3_BTNS = [
-    [{"type": "callback", "text": "Маленькая ты. Спрятанная, чтобы быть нормальной", "payload": "A"}],
-    [{"type": "callback", "text": "Ключ от двери, которую обходишь. А вдруг?", "payload": "B"}],
-    [{"type": "callback", "text": "Зеркало. Ты, но не та, кто сейчас", "payload": "C"}]
+    [{"type": "callback", "text": "Маленькая спрятанная я", "payload": "A"}],
+    [{"type": "callback", "text": "Ключ от обходной двери", "payload": "B"}],
+    [{"type": "callback", "text": "Зеркало. Я, но не та", "payload": "C"}]
 ]
 
 AFTER_RESULT = "⚠️ Но в твоём доме есть ещё 2 закрытые комнаты.\n\n🔥 Одна из них — Комната Тела. Там лежит твоя усталость, которую ты называешь ленью.\n\n🔥 Другая — Комната Отношений. Там звучит голос, который ты приняла за свой. Но это не твой голос.\n\nИ в одной из этих комнат сейчас пожар. Ты не слышишь тревогу, потому что дверь плотно закрыта. Но дым уже идёт по вентиляции — в твою тревожность, в твою еду, в твои бессонницы.\n\nПолный обход всех 5 этажей Дома Души — в моей трансформационной игре. Там мы откроем эти двери, достанем то, что прячется в темноте, и ты получишь ключ от чердака.\n\nА пока — вот твой первый ключ 🗝️\n\nМини-техника 30 секунд до себя:\nКогда в следующий раз захочется съесть тревогу / закрыться / уйти в дела — спроси себя: А что я сейчас НЕ чувствую? Подожди 30 секунд. Ответ придёт."
@@ -170,7 +209,7 @@ DIAG_TEXTS = {
 
 BOOK_BTN = [[{"type": "callback", "text": "Забронировать диагностику", "payload": "book_diagnostic"}]]
 
-# ==================== 27 РЕЗУЛЬТАТОВ (БЕЗ HTML) ====================
+# ==================== 27 РЕЗУЛЬТАТОВ ====================
 RESULTS = {
     "AAA": "🏠 Твой Дом Души: Крепость с тайной комнатой\n\nТы выросла из своих стен, но продолжаешь в них жить — потому что так положено. За окном тарелка с едой и вина: ты кормишь не тело, а тревогу. А на чердаке спрятана маленькая ты, которой никто не разрешил просто быть.\n\nСинтез: Ты взрослая снаружи и замороженная внутри. Еда — мост между ними. Каждый раз, когда ты ешь стресс, ты кормишь ту девочку, которая до сих пор думает, что должна быть хорошей. Но крепость — это тюрьма, если в ней нет хозяйки.",
     "AAB": "🏠 Твой Дом Души: Золотая клетка с запертым выходом\n\nТвой дом стоит крепко, но тебе в нём тесно — ты переросла правила, по которым строила. В окне — тарелка и вина: еда стала способом заполнить пустоту от нельзя. На чердаке — ключ от двери, которую ты всё время обходишь. Ты знаешь, куда она ведёт. И боишься.\n\nСинтез: Ты держишься за комфорт старых стен, но внутри уже нет места. Ключ в твоих руках — но ты боишься, что за дверью нет гарантий. Поэтому ты ешь. Потому что еда — единственное, что даёт ощущение контроля в доме, где ты сама себе пленница.",
@@ -202,32 +241,36 @@ RESULTS = {
 }
 
 # ==================== ЛОГИКА БОТА ====================
-def handle_start(cid, users):
+def handle_start(cid, users, user_id=None):
     u = get_user(users, cid)
     u["state"] = "q1"
     save_users(users)
-    max_send_with_buttons(cid, WELCOME, [[{"type": "callback", "text": "Открыть дверь", "payload": "start_quest"}]])
+    max_send_with_buttons(cid, WELCOME, [[{"type": "callback", "text": "Открыть дверь", "payload": "start_quest"}]], user_id=user_id)
 
-def handle_callback(cid, data, users):
+def handle_callback(cid, data, users, callback_id=None, user_id=None):
+    # Обязательно отвечаем на callback — иначе кнопка "крутится"
+    if callback_id:
+        max_answer_callback(callback_id)
+
     u = get_user(users, cid)
     st = u.get("state", "start")
 
     if data == "start_quest" and st == "q1":
-        max_send_with_buttons(cid, Q1, Q1_BTNS)
+        max_send_with_buttons(cid, Q1, Q1_BTNS, user_id=user_id)
         return
 
     if st == "q1" and data in "ABC":
         u["answers"]["q1"] = data
         u["state"] = "q2"
         save_users(users)
-        max_send_with_buttons(cid, Q2, Q2_BTNS)
+        max_send_with_buttons(cid, Q2, Q2_BTNS, user_id=user_id)
         return
 
     if st == "q2" and data in "ABC":
         u["answers"]["q2"] = data
         u["state"] = "q3"
         save_users(users)
-        max_send_with_buttons(cid, Q3, Q3_BTNS)
+        max_send_with_buttons(cid, Q3, Q3_BTNS, user_id=user_id)
         return
 
     if st == "q3" and data in "ABC":
@@ -238,11 +281,11 @@ def handle_callback(cid, data, users):
         u["result_time"] = datetime.now().isoformat()
         save_users(users)
 
-        max_send_text(cid, RESULTS.get(code, RESULTS["AAA"]))
+        max_send_text(cid, RESULTS.get(code, RESULTS["AAA"]), user_id=user_id)
         time.sleep(2)
-        max_send_text(cid, AFTER_RESULT)
+        max_send_text(cid, AFTER_RESULT, user_id=user_id)
         time.sleep(2)
-        max_send_with_buttons(cid, ROOM_CHOICE, ROOM_BTNS)
+        max_send_with_buttons(cid, ROOM_CHOICE, ROOM_BTNS, user_id=user_id)
         u["state"] = "room"
         save_users(users)
         return
@@ -251,7 +294,7 @@ def handle_callback(cid, data, users):
         u["room_choice"] = data
         u["state"] = "booking"
         save_users(users)
-        max_send_with_buttons(cid, DIAG_TEXTS.get(data, DIAG_TEXTS["room_both"]), BOOK_BTN)
+        max_send_with_buttons(cid, DIAG_TEXTS.get(data, DIAG_TEXTS["room_both"]), BOOK_BTN, user_id=user_id)
         return
 
     if data == "book_diagnostic":
@@ -265,11 +308,11 @@ def handle_callback(cid, data, users):
             [{"type": "callback", "text": "Ср 16:00", "payload": "slot_wed_16"}],
             [{"type": "callback", "text": "Чт 18:00", "payload": "slot_thu_18"}]
         ]
-        max_send_with_buttons(cid, txt, slots)
+        max_send_with_buttons(cid, txt, slots, user_id=user_id)
 
         if ADMIN_ID:
             code = u.get("result_code", "")
-            max_send_text(ADMIN_ID, f"🔔 Запись! User: {cid}\nКод: {code}\nКомната: {u.get('room_choice','')}")
+            max_send_text(ADMIN_ID, f"🔔 Запись! User: {cid}\nКод: {code}\nКомната: {u.get('room_choice','')}", user_id=None)
         return
 
     if data.startswith("slot_"):
@@ -278,7 +321,7 @@ def handle_callback(cid, data, users):
         u["booked_slot"] = slot
         u["state"] = "confirmed"
         save_users(users)
-        max_send_text(cid, f"✅ Забронировала: {slot}.\nСсылка на Zoom придёт за 30 минут. Жду встречи! 💫")
+        max_send_text(cid, f"✅ Забронировала: {slot}.\nСсылка на Zoom придёт за 30 минут. Жду встречи! 💫", user_id=user_id)
         return
 
 # ==================== WEBHOOK ====================
@@ -296,24 +339,25 @@ def webhook():
         cid = update["chat_id"]
 
         if update["type"] == "callback":
-            handle_callback(cid, update["data"], users)
+            handle_callback(cid, update["data"], users, update.get("callback_id"), update.get("user_id"))
             return jsonify({"ok": True}), 200
 
         if update["type"] in ["message", "bot_started"]:
             text = update.get("text", "")
             u = get_user(users, cid)
+            user_id = update.get("user_id")
 
             if text.lower() in ["/start", "дом", "начать", "start", "ключ"]:
-                handle_start(cid, users)
+                handle_start(cid, users, user_id=user_id)
                 return jsonify({"ok": True}), 200
 
             if u.get("state") == "booked" and text:
                 u["custom_slot"] = text
                 save_users(users)
-                max_send_text(cid, f"✅ Записала: {text}. Ссылка придёт за 30 минут. Жду! 💫")
+                max_send_text(cid, f"✅ Записала: {text}. Ссылка придёт за 30 минут. Жду! 💫", user_id=user_id)
                 return jsonify({"ok": True}), 200
 
-            handle_start(cid, users)
+            handle_start(cid, users, user_id=user_id)
             return jsonify({"ok": True}), 200
 
         return jsonify({"ok": True}), 200
@@ -327,5 +371,6 @@ def index():
     return "Твой ключ на чердаке — работает ✅"
 
 if __name__ == "__main__":
+    subscribe_webhook()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
