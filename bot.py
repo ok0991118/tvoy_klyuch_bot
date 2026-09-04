@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Бот-воронка «Твой ключ на чердаке» — Max API v2
-+ Планерка, напоминания, уведомления админу, эмодзи
++ Планерка API, напоминания, уведомления админу, эмодзи
 """
 
 import os
@@ -26,7 +26,9 @@ WEBHOOK_PATH = "/webhook"
 DATA_FILE = "users_state.json"
 AUDIO_TOKENS_FILE = "audio_tokens.json"
 
-# ==================== ПЛАНЕРКА (ссылки) ====================
+# ==================== ПЛАНЕРКА ====================
+PLANERKA_API_KEY = os.getenv("PLANERKA_API_KEY", "cal_8de1feaefc02d947948148369cf63ad13294655e30ba1c7b298f64063de2d4af")
+PLANERKA_BASE = "https://planerka.app"
 PLANERKA_DIAGNOSTIC_URL = "https://planerka.app/natalya-lyulkina-x9g3qt/30min"
 PLANERKA_INDIVIDUAL_URL = "https://planerka.app/natalya-lyulkina-x9g3qt/individualnaya-igra"
 PLANERKA_GROUP_URL = "https://planerka.app/natalya-lyulkina-x9g3qt/gruppovaya-igra"
@@ -45,6 +47,12 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
+PLANERKA_HEADERS = {
+    "Authorization": f"Bearer {PLANERKA_API_KEY}",
+    "cal-api-version": "2024-09-04",
+    "Content-Type": "application/json"
+}
+
 # ==================== МЕДИА ====================
 AUDIO_URLS = {
     "after_result": "https://storage.yandexcloud.net/tvoy-klyuch-bot/AFTER_RESULT.mp3",
@@ -54,12 +62,99 @@ AUDIO_URLS = {
     "booking_confirmed": "https://storage.yandexcloud.net/tvoy-klyuch-bot/Podtverzhdenie-zapisi.mp3",
 }
 
-# ==================== ПЛАНЕРКА: СЛОТЫ ====================
+# ==================== ПЛАНЕРКА: API ====================
+_planerka_event_type_id = None
+
+def _get_planerka_event_type_id():
+    """Получает ID первого доступного типа встречи из Планерки."""
+    global _planerka_event_type_id
+    if _planerka_event_type_id:
+        return _planerka_event_type_id
+
+    try:
+        resp = requests.get(
+            f"{PLANERKA_BASE}/rest/v2/event-types",
+            headers=PLANERKA_HEADERS,
+            timeout=15,
+            verify=False
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") == "success" and data.get("data"):
+            # Ищем тип с длительностью 30 минут или словом "диагностика"
+            for et in data["data"]:
+                title = (et.get("title") or "").lower()
+                if "30" in title or "диагност" in title or "мин" in title:
+                    _planerka_event_type_id = et["id"]
+                    logger.info(f"Planerka event type: {et['title']} (id={et['id']})")
+                    return _planerka_event_type_id
+            # Fallback: первый доступный
+            _planerka_event_type_id = data["data"][0]["id"]
+            logger.info(f"Planerka event type (fallback): {data['data'][0]['title']} (id={_planerka_event_type_id})")
+            return _planerka_event_type_id
+    except Exception as e:
+        logger.error(f"Planerka event-types error: {e}")
+    return None
+
 def get_planerka_slots():
     """
-    Возвращает 3 ближайших слота (вт/ср/чт) динамически.
-    Когда подключишь API Планерки — заменишь тело функции.
+    Запрашивает свободные слоты из Планерки API.
+    Если API недоступен — fallback на ручную генерацию.
     """
+    event_type_id = _get_planerka_event_type_id()
+    if not event_type_id:
+        logger.warning("Нет eventTypeId — использую fallback-слоты")
+        return _generate_fallback_slots()
+
+    now = datetime.now()
+    start = now.strftime("%Y-%m-%dT00:00:00Z")
+    end = (now + timedelta(days=14)).strftime("%Y-%m-%dT23:59:59Z")
+
+    try:
+        resp = requests.get(
+            f"{PLANERKA_BASE}/rest/v2/slots",
+            headers=PLANERKA_HEADERS,
+            params={
+                "eventTypeId": event_type_id,
+                "start": start,
+                "end": end,
+                "timeZone": "Europe/Moscow"
+            },
+            timeout=15,
+            verify=False
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") != "success":
+            raise ValueError(f"Planerka error: {data}")
+
+        slots = []
+        for date_str, times in data.get("data", {}).items():
+            for t in times:
+                start_iso = t.get("start", "")
+                dt = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+                # Переводим в московское время (примерно)
+                dt_local = dt.astimezone() if dt.tzinfo else dt
+                wd = dt_local.weekday()
+                if wd in [1, 2, 3]:  # вт-ср-чт
+                    wd_ru = {1:"Вт", 2:"Ср", 3:"Чт"}[wd]
+                    label = f"{wd_ru} {dt_local.strftime('%H:%M')}"
+                    slots.append({"label": label, "value": label})
+                if len(slots) >= 3:
+                    break
+            if len(slots) >= 3:
+                break
+
+        if slots:
+            logger.info(f"Planerka slots: {slots}")
+            return slots
+        else:
+            raise ValueError("No slots from Planerka")
+    except Exception as e:
+        logger.error(f"Planerka slots error: {e}")
+        return _generate_fallback_slots()
+
+def _generate_fallback_slots():
     now = datetime.now()
     slots = []
     day = now
@@ -618,7 +713,7 @@ def handle_callback(cid, data, users, callback_id=None, user_id=None):
             f"✅ Отлично! Ты выбрала: {slot_raw}.\n\n"
             f"Чтобы завершить запись, перейди по ссылке и подтверди время:\n"
             f"👉 {PLANERKA_DIAGNOSTIC_URL}\n\n"
-            f"Ссылка на Zoom придёт автоматически после подтверждения. Жду встречи! 💫"
+            f"Жду встречи! 💫"
         )
         max_send_text(cid, confirm_text, user_id=user_id)
         notify_admin(f"✅ User {cid} ВЫБРАЛА слот: {slot_raw} (код {u.get('result_code','')}, комната {u.get('room_choice','')})")
@@ -640,7 +735,6 @@ def handle_callback(cid, data, users, callback_id=None, user_id=None):
         return
 
 def _send_booking_menu(cid, user_id):
-    """Отправляет меню записи с 3 ближайшими слотами + другие услуги"""
     slots = get_planerka_slots()
     slot_buttons = []
     for s in slots:
