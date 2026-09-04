@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Бот-воронка «Твой ключ на чердаке» — Max API v2
-Исправления: callback answer, user_id для личных диалогов, короткие кнопки, автоподписка
+Голосовые: кэширование токенов, ленивая загрузка
 """
 
 import os
@@ -13,6 +13,7 @@ from flask import Flask, request, jsonify
 from datetime import datetime
 import urllib3
 import time
+from urllib.parse import unquote
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -21,6 +22,7 @@ ADMIN_ID = os.getenv("ADMIN_ID", "")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 WEBHOOK_PATH = "/webhook"
 DATA_FILE = "users_state.json"
+TOKENS_FILE = "audio_tokens.json"
 
 API_BASE = "https://platform-api2.max.ru"
 
@@ -32,6 +34,107 @@ HEADERS = {
     "Authorization": MAX_BOT_TOKEN,
     "Content-Type": "application/json"
 }
+
+# ==================== ГОЛОСОВЫЕ ====================
+AUDIO_URLS = {
+    "after_result": "https://storage.yandexcloud.net/tvoy-klyuch-bot/AFTER_RESULT.mp3",
+    "room_body": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_body.wav",
+    "room_relations": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_relations.wav",
+    "room_both": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_both.wav",
+    "booking_confirmed": "https://storage.yandexcloud.net/tvoy-klyuch-bot/Podtverzhdenie%20zapisi.wav",
+}
+
+def load_audio_tokens():
+    if os.path.exists(TOKENS_FILE):
+        with open(TOKENS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_audio_tokens(tokens):
+    with open(TOKENS_FILE, "w", encoding="utf-8") as f:
+        json.dump(tokens, f, ensure_ascii=False, indent=2)
+
+def get_audio_token(audio_url):
+    """Загружает аудио в Max и возвращает токен (с кэшированием)."""
+    tokens = load_audio_tokens()
+    if audio_url in tokens:
+        return tokens[audio_url]
+
+    logger.info(f"Загружаю аудио в Max: {audio_url}")
+    try:
+        # 1. Скачиваем файл
+        r = requests.get(audio_url, timeout=30, verify=False)
+        r.raise_for_status()
+        file_bytes = r.content
+        filename = unquote(audio_url.split("/")[-1].split("?")[0]) or "audio.mp3"
+
+        # 2. Запрашиваем URL для загрузки
+        resp = requests.post(f"{API_BASE}/uploads?type=audio", headers=HEADERS, timeout=10, verify=False)
+        resp.raise_for_status()
+        upload_data = resp.json()
+        upload_url = upload_data.get("url")
+        token = upload_data.get("token")
+
+        if not upload_url:
+            raise ValueError("No upload_url in /uploads response")
+
+        # 3. Загружаем файл multipart/form-data, поле 'data'
+        files = {"data": (filename, file_bytes, "audio/mpeg")}
+        up_resp = requests.post(upload_url, files=files, timeout=30, verify=False)
+        logger.info(f"Upload response: {up_resp.status_code} | {up_resp.text[:200]}")
+
+        # Если токена не было на шаге 2, пробуем достать из ответа загрузки
+        if not token and up_resp.status_code == 200:
+            try:
+                token = up_resp.json().get("token")
+            except Exception:
+                pass
+
+        if not token:
+            # Fallback: некоторые реализации возвращают token внутри upload_url
+            from urllib.parse import parse_qs, urlparse
+            qs = parse_qs(urlparse(upload_url).query)
+            if "token" in qs:
+                token = qs["token"][0]
+            elif "uuid" in qs:
+                token = qs["uuid"][0]
+
+        if not token:
+            raise ValueError("Could not obtain upload token")
+
+        # 4. Даём серверу время на обработку
+        time.sleep(2)
+
+        tokens[audio_url] = token
+        save_audio_tokens(tokens)
+        logger.info(f"Аудио загружено, token: {token[:20]}...")
+        return token
+
+    except Exception as e:
+        logger.error(f"Ошибка загрузки аудио: {e}")
+        return None
+
+def max_send_audio(chat_id, token, user_id=None):
+    """Отправка аудио-вложения по токену Max."""
+    if not token:
+        return None
+    target = user_id or chat_id
+    param = "user_id" if user_id else "chat_id"
+    url = f"{API_BASE}/messages?{param}={target}"
+    payload = {
+        "attachments": [{
+            "type": "audio",
+            "payload": {"token": token}
+        }]
+    }
+    try:
+        r = requests.post(url, headers=HEADERS, json=payload, timeout=10, verify=False)
+        r.raise_for_status()
+        logger.info(f"Аудио отправлено: {r.status_code}")
+        return r.json()
+    except Exception as e:
+        logger.error(f"Ошибка отправки аудио: {e}")
+        return None
 
 # ==================== ХРАНИЛИЩЕ ====================
 def load_users():
@@ -58,7 +161,7 @@ def get_user(users, uid):
 # ==================== ПОДПИСКА WEBHOOK ====================
 def subscribe_webhook():
     if not RENDER_EXTERNAL_URL:
-        logger.info("RENDER_EXTERNAL_URL не задан — автоподписка пропущена. Подпиши вручную через POST /subscriptions")
+        logger.info("RENDER_EXTERNAL_URL не задан — автоподписка пропущена.")
         return
     webhook_url = RENDER_EXTERNAL_URL.rstrip("/") + WEBHOOK_PATH
     payload = {
@@ -73,7 +176,6 @@ def subscribe_webhook():
 
 # ==================== ОТПРАВКА ====================
 def max_answer_callback(callback_id):
-    """Обязательный ответ на callback — убирает спиннер с кнопки"""
     if not callback_id:
         return
     url = f"{API_BASE}/answers?callback_id={callback_id}"
@@ -84,7 +186,6 @@ def max_answer_callback(callback_id):
         logger.error(f"Answer callback error: {e}")
 
 def max_send_text(chat_id, text, user_id=None):
-    """Отправка текста. Для личных диалогов 1-на-1 лучше использовать user_id."""
     target = user_id or chat_id
     param = "user_id" if user_id else "chat_id"
     url = f"{API_BASE}/messages?{param}={target}"
@@ -123,7 +224,6 @@ def max_send_with_buttons(chat_id, text, buttons, user_id=None):
 def parse_max_update(data):
     logger.info(f"Webhook raw: {json.dumps(data, ensure_ascii=False)[:800]}")
 
-    # Поддержка массива updates (для long polling) или одиночного объекта (webhook)
     updates = data if isinstance(data, list) else [data]
     if not updates:
         return None
@@ -148,7 +248,6 @@ def parse_max_update(data):
         msg = item.get("message", {})
         recipient = msg.get("recipient", {}) if msg else {}
         sender = item.get("sender", {})
-        # fallback: если chat_id нет в message, берём из callback или sender
         chat_id = recipient.get("chat_id") or cb.get("chat_id") or sender.get("user_id")
         return {
             "type": "callback",
@@ -248,7 +347,6 @@ def handle_start(cid, users, user_id=None):
     max_send_with_buttons(cid, WELCOME, [[{"type": "callback", "text": "Открыть дверь", "payload": "start_quest"}]], user_id=user_id)
 
 def handle_callback(cid, data, users, callback_id=None, user_id=None):
-    # Обязательно отвечаем на callback — иначе кнопка "крутится"
     if callback_id:
         max_answer_callback(callback_id)
 
@@ -281,10 +379,21 @@ def handle_callback(cid, data, users, callback_id=None, user_id=None):
         u["result_time"] = datetime.now().isoformat()
         save_users(users)
 
+        # 1. Текстовый результат
         max_send_text(cid, RESULTS.get(code, RESULTS["AAA"]), user_id=user_id)
         time.sleep(2)
+
+        # 2. Голосовое "после результата"
+        token = get_audio_token(AUDIO_URLS["after_result"])
+        if token:
+            max_send_audio(cid, token, user_id=user_id)
+            time.sleep(1)
+
+        # 3. Текст AFTER_RESULT
         max_send_text(cid, AFTER_RESULT, user_id=user_id)
         time.sleep(2)
+
+        # 4. Выбор комнаты
         max_send_with_buttons(cid, ROOM_CHOICE, ROOM_BTNS, user_id=user_id)
         u["state"] = "room"
         save_users(users)
@@ -294,7 +403,15 @@ def handle_callback(cid, data, users, callback_id=None, user_id=None):
         u["room_choice"] = data
         u["state"] = "booking"
         save_users(users)
+
+        # Текстовый разбор комнаты
         max_send_with_buttons(cid, DIAG_TEXTS.get(data, DIAG_TEXTS["room_both"]), BOOK_BTN, user_id=user_id)
+
+        # Голосовое для выбранной комнаты
+        token = get_audio_token(AUDIO_URLS.get(data))
+        if token:
+            time.sleep(2)
+            max_send_audio(cid, token, user_id=user_id)
         return
 
     if data == "book_diagnostic":
@@ -321,7 +438,15 @@ def handle_callback(cid, data, users, callback_id=None, user_id=None):
         u["booked_slot"] = slot
         u["state"] = "confirmed"
         save_users(users)
+
+        # Текст подтверждения
         max_send_text(cid, f"✅ Забронировала: {slot}.\nСсылка на Zoom придёт за 30 минут. Жду встречи! 💫", user_id=user_id)
+
+        # Голосовое подтверждение
+        token = get_audio_token(AUDIO_URLS["booking_confirmed"])
+        if token:
+            time.sleep(1)
+            max_send_audio(cid, token, user_id=user_id)
         return
 
 # ==================== WEBHOOK ====================
