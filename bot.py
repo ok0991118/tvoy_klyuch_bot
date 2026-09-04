@@ -38,10 +38,10 @@ HEADERS = {
 # ==================== ГОЛОСОВЫЕ ====================
 AUDIO_URLS = {
     "after_result": "https://storage.yandexcloud.net/tvoy-klyuch-bot/AFTER_RESULT.mp3",
-    "room_body": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_body.wav",
-    "room_relations": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_relations.wav",
-    "room_both": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_both.wav",
-    "booking_confirmed": "https://storage.yandexcloud.net/tvoy-klyuch-bot/Podtverzhdenie%20zapisi.wav",
+    "room_body": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_body.mp3",
+    "room_relations": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_relations.mp3",
+    "room_both": "https://storage.yandexcloud.net/tvoy-klyuch-bot/DIAG_TEXTSroom_both.mp3",
+    "booking_confirmed": "https://storage.yandexcloud.net/tvoy-klyuch-bot/Podtverzhdenie%20zapisi.mp3",
 }
 
 def load_audio_tokens():
