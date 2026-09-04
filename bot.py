@@ -9,7 +9,6 @@ import os
 import json
 import logging
 import requests
-import threading
 from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
 import urllib3
@@ -27,16 +26,15 @@ WEBHOOK_PATH = "/webhook"
 DATA_FILE = "users_state.json"
 AUDIO_TOKENS_FILE = "audio_tokens.json"
 
-# ==================== ПЛАНЕРКА ====================
-PLANERKA_DIAGNOSTIC_URL = os.getenv("PLANERKA_DIAGNOSTIC_URL", "https://planerka.app/natalya-lyulkina-x9g3qt/30min")
-PLANERKA_INDIVIDUAL_URL = os.getenv("PLANERKA_INDIVIDUAL_URL", "https://planerka.app/natalya-lyulkina-x9g3qt/individualnaya-igra")
-PLANERKA_GROUP_URL = os.getenv("PLANERKA_GROUP_URL", "https://planerka.app/natalya-lyulkina-x9g3qt/gruppovaya-igra")
+# ==================== ПЛАНЕРКА (ссылки) ====================
+PLANERKA_DIAGNOSTIC_URL = "https://planerka.app/natalya-lyulkina-x9g3qt/30min"
+PLANERKA_INDIVIDUAL_URL = "https://planerka.app/natalya-lyulkina-x9g3qt/individualnaya-igra"
+PLANERKA_GROUP_URL = "https://planerka.app/natalya-lyulkina-x9g3qt/gruppovaya-igra"
 
 API_BASE = "https://platform-api2.max.ru"
 
-# ==================== ЗАГРУЗИ СЮДА ССЫЛКУ НА КАРТИНКУ ====================
+# ==================== КАРТИНКА С ДОМАМИ ====================
 HOUSE_IMAGE_URL = "https://storage.yandexcloud.net/tvoy-klyuch-bot/houses.jpg"
-# =======================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -59,23 +57,9 @@ AUDIO_URLS = {
 # ==================== ПЛАНЕРКА: СЛОТЫ ====================
 def get_planerka_slots():
     """
-    Пытается получить слоты из Планерки.
-    Если API недоступен — возвращает 3 ближайших слота (вт/ср/чт) динамически.
+    Возвращает 3 ближайших слота (вт/ср/чт) динамически.
+    Когда подключишь API Планерки — заменишь тело функции.
     """
-    try:
-        # TODO: заменить на реальный endpoint Planerka API
-        # resp = requests.get(
-        #     "https://planerka.app/api/v1/slots",
-        #     headers={"Authorization": f"Bearer {os.getenv('PLANERKA_API_KEY','')}"},
-        #     timeout=10
-        # )
-        # data = resp.json()
-        # return [{"label": s["label"], "value": s["value"]} for s in data["slots"][:3]]
-        raise NotImplementedError("API Planerka не подключен — используем fallback")
-    except Exception:
-        return _generate_fallback_slots()
-
-def _generate_fallback_slots():
     now = datetime.now()
     slots = []
     day = now
@@ -445,6 +429,8 @@ DIAG_TEXTS = {
     )
 }
 
+BOOK_BTN = [[{"type": "callback", "text": "🗓 Забронировать диагностику", "payload": "book_diagnostic"}]]
+
 BOOKING_MENU_TEXT = (
     "📅 Чтобы записаться, выбери удобный вариант:\n\n"
     "🩺 15-минутная диагностика — бесплатно, выбери слот ниже.\n"
@@ -453,7 +439,7 @@ BOOKING_MENU_TEXT = (
     "Я рядом и помогу с выбором! 💫"
 )
 
-# ==================== 27 РЕЗУЛЬТАТОВ (эмодзи добавлены к заголовкам) ====================
+# ==================== 27 РЕЗУЛЬТАТОВ ====================
 RESULTS = {
     "AAA": "🏠 Твой Дом Души: Крепость с тайной комнатой\n\nТы выросла из своих стен, но продолжаешь в них жить — потому что так положено. За окном тарелка с едой и вина: ты кормишь не тело, а тревогу. А на чердаке спрятана маленькая ты, которой никто не разрешил просто быть.\n\n🎯 Синтез: Ты взрослая снаружи и замороженная внутри. Еда — мост между ними. Каждый раз, когда ты ешь стресс, ты кормишь ту девочку, которая до сих пор думает, что должна быть хорошей. Но крепость — это тюрьма, если в ней нет хозяйки.",
     "AAB": "🏠 Твой Дом Души: Золотая клетка с запертым выходом\n\nТвой дом стоит крепко, но тебе в нём тесно — ты переросла правила, по которым строила. В окне — тарелка и вина: еда стала способом заполнить пустоту от нельзя. На чердаке — ключ от двери, которую ты всё время обходишь. Ты знаешь, куда она ведёт. И боишься.\n\n🎯 Синтез: Ты держишься за комфорт старых стен, но внутри уже нет места. Ключ в твоих руках — но ты боишься, что за дверью нет гарантий. Поэтому ты ешь. Потому что еда — единственное, что даёт ощущение контроля в доме, где ты сама себе пленница.",
@@ -500,10 +486,10 @@ def handle_callback(cid, data, users, callback_id=None, user_id=None):
 
     u = get_user(users, cid)
     u["last_activity"] = datetime.now().isoformat()
-    u["reminder_sent"] = False  # сбрасываем флаг при активности
+    u["reminder_sent"] = False
     st = u.get("state", "start")
 
-    # Напоминание / продолжение
+    # === НАПОМИНАНИЕ / ПРОДОЛЖЕНИЕ ===
     if data == "reminder_continue":
         if st == "house_choice":
             max_send_with_buttons(cid, HOUSE_TEXT, HOUSE_BTNS, user_id=user_id)
@@ -598,6 +584,7 @@ def handle_callback(cid, data, users, callback_id=None, user_id=None):
         notify_admin(f"🔥 User {cid} выбирает комнату")
         return
 
+    # === ВЫБОР КОМНАТЫ ===
     if st == "room" and data.startswith("room_"):
         u["room_choice"] = data
         u["state"] = "booking"
@@ -624,7 +611,7 @@ def handle_callback(cid, data, users, callback_id=None, user_id=None):
         slot_raw = data.replace("slot_", "")
         u["booked_slot"] = slot_raw
         u["state"] = "confirmed"
-        u["reminder_sent"] = True  # не напоминать, если записался
+        u["reminder_sent"] = True
         save_users(users)
 
         confirm_text = (
@@ -665,7 +652,6 @@ def _send_booking_menu(cid, user_id):
     ]
 
     all_buttons = slot_buttons + other_buttons
-
     max_send_with_buttons(cid, BOOKING_MENU_TEXT, all_buttons, user_id=user_id)
 
 # ==================== WEBHOOK ====================
