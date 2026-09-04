@@ -22,12 +22,12 @@ ADMIN_ID = os.getenv("ADMIN_ID", "")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 WEBHOOK_PATH = "/webhook"
 DATA_FILE = "users_state.json"
-TOKENS_FILE = "upload_tokens.json"
+AUDIO_TOKENS_FILE = "audio_tokens.json"
 
 API_BASE = "https://platform-api2.max.ru"
 
 # ==================== ЗАГРУЗИ СЮДА ССЫЛКУ НА КАРТИНКУ ====================
-HOUSE_IMAGE_URL = "https://storage.yandexcloud.net/tvoy-klyuch-bot/4doma.jpg"
+HOUSE_IMAGE_URL = "https://storage.yandexcloud.net/tvoy-klyuch-bot/houses.jpg"
 # =======================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -48,31 +48,30 @@ AUDIO_URLS = {
     "booking_confirmed": "https://storage.yandexcloud.net/tvoy-klyuch-bot/Podtverzhdenie%20zapisi.wav",
 }
 
-def load_tokens_cache():
-    if os.path.exists(TOKENS_FILE):
-        with open(TOKENS_FILE, "r", encoding="utf-8") as f:
+def load_audio_tokens():
+    if os.path.exists(AUDIO_TOKENS_FILE):
+        with open(AUDIO_TOKENS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     return {}
 
-def save_tokens_cache(tokens):
-    with open(TOKENS_FILE, "w", encoding="utf-8") as f:
+def save_audio_tokens(tokens):
+    with open(AUDIO_TOKENS_FILE, "w", encoding="utf-8") as f:
         json.dump(tokens, f, ensure_ascii=False, indent=2)
 
-def get_upload_token(media_url, upload_type="audio"):
-    """Универсальная загрузка файла в Max (audio/image). Возвращает токен."""
-    tokens = load_tokens_cache()
-    cache_key = f"{upload_type}:{media_url}"
-    if cache_key in tokens:
-        return tokens[cache_key]
+def get_audio_token(audio_url):
+    """Загружает аудио в Max и возвращает токен (с кэшированием)."""
+    tokens = load_audio_tokens()
+    if audio_url in tokens:
+        return tokens[audio_url]
 
-    logger.info(f"Загружаю {upload_type} в Max: {media_url}")
+    logger.info(f"Загружаю аудио в Max: {audio_url}")
     try:
-        r = requests.get(media_url, timeout=30, verify=False)
+        r = requests.get(audio_url, timeout=30, verify=False)
         r.raise_for_status()
         file_bytes = r.content
-        filename = unquote(media_url.split("/")[-1].split("?")[0]) or "file"
+        filename = unquote(audio_url.split("/")[-1].split("?")[0]) or "audio.mp3"
 
-        resp = requests.post(f"{API_BASE}/uploads?type={upload_type}", headers=HEADERS, timeout=10, verify=False)
+        resp = requests.post(f"{API_BASE}/uploads?type=audio", headers=HEADERS, timeout=10, verify=False)
         resp.raise_for_status()
         upload_data = resp.json()
         upload_url = upload_data.get("url")
@@ -83,7 +82,7 @@ def get_upload_token(media_url, upload_type="audio"):
 
         files = {"data": (filename, file_bytes, "application/octet-stream")}
         up_resp = requests.post(upload_url, files=files, timeout=30, verify=False)
-        logger.info(f"Upload response: {up_resp.status_code} | {up_resp.text[:200]}")
+        logger.info(f"Upload audio response: {up_resp.status_code} | {up_resp.text[:200]}")
 
         if not token and up_resp.status_code == 200:
             try:
@@ -100,32 +99,54 @@ def get_upload_token(media_url, upload_type="audio"):
             raise ValueError("Could not obtain upload token")
 
         time.sleep(2)
-        tokens[cache_key] = token
-        save_tokens_cache(tokens)
-        logger.info(f"{upload_type} загружен, token: {token[:20]}...")
+        tokens[audio_url] = token
+        save_audio_tokens(tokens)
+        logger.info(f"Audio загружен, token: {token[:20]}...")
         return token
 
     except Exception as e:
-        logger.error(f"Ошибка загрузки {upload_type}: {e}")
+        logger.error(f"Ошибка загрузки аудио: {e}")
         return None
 
-def max_send_media_by_token(chat_id, token, media_type, user_id=None):
+def max_send_audio_by_token(chat_id, token, user_id=None):
+    if not token:
+        return None
     target = user_id or chat_id
     param = "user_id" if user_id else "chat_id"
     url = f"{API_BASE}/messages?{param}={target}"
     payload = {
         "attachments": [{
-            "type": media_type,
+            "type": "audio",
             "payload": {"token": token}
         }]
     }
     try:
         r = requests.post(url, headers=HEADERS, json=payload, timeout=10, verify=False)
         r.raise_for_status()
-        logger.info(f"{media_type} отправлено: {r.status_code}")
+        logger.info(f"Audio отправлено: {r.status_code}")
         return r.json()
     except Exception as e:
-        logger.error(f"Ошибка отправки {media_type}: {e}")
+        logger.error(f"Ошибка отправки audio: {e}")
+        return None
+
+def max_send_image_by_url(chat_id, image_url, user_id=None):
+    """Отправка изображения по прямой ссылке (Max API поддерживает url для image)"""
+    target = user_id or chat_id
+    param = "user_id" if user_id else "chat_id"
+    url = f"{API_BASE}/messages?{param}={target}"
+    payload = {
+        "attachments": [{
+            "type": "image",
+            "payload": {"url": image_url}
+        }]
+    }
+    try:
+        r = requests.post(url, headers=HEADERS, json=payload, timeout=10, verify=False)
+        r.raise_for_status()
+        logger.info(f"Image отправлено: {r.status_code}")
+        return r.json()
+    except Exception as e:
+        logger.error(f"Ошибка отправки image: {e}")
         return None
 
 # ==================== ХРАНИЛИЩЕ ====================
@@ -371,12 +392,10 @@ def handle_callback(cid, data, users, callback_id=None, user_id=None):
     if data == "ready_intro" and st == "intro":
         u["state"] = "house_choice"
         save_users(users)
-        # 1. Картинка
-        img_token = get_upload_token(HOUSE_IMAGE_URL, upload_type="image")
-        if img_token:
-            max_send_media_by_token(cid, img_token, "image", user_id=user_id)
-            time.sleep(1)
-        # 2. Текст с кнопками
+        # Картинка по прямой ссылке (без /uploads!)
+        max_send_image_by_url(cid, HOUSE_IMAGE_URL, user_id=user_id)
+        time.sleep(1)
+        # Текст с кнопками
         max_send_with_buttons(cid, HOUSE_TEXT, HOUSE_BTNS, user_id=user_id)
         return
 
@@ -428,9 +447,9 @@ def handle_callback(cid, data, users, callback_id=None, user_id=None):
         time.sleep(2)
 
         # 2. Голосовое "после результата"
-        token = get_upload_token(AUDIO_URLS["after_result"], upload_type="audio")
+        token = get_audio_token(AUDIO_URLS["after_result"])
         if token:
-            max_send_media_by_token(cid, token, "audio", user_id=user_id)
+            max_send_audio_by_token(cid, token, user_id=user_id)
             time.sleep(1)
 
         # 3. Текст AFTER_RESULT
@@ -452,10 +471,10 @@ def handle_callback(cid, data, users, callback_id=None, user_id=None):
         max_send_with_buttons(cid, DIAG_TEXTS.get(data, DIAG_TEXTS["room_both"]), BOOK_BTN, user_id=user_id)
 
         # Голосовое для выбранной комнаты
-        token = get_upload_token(AUDIO_URLS.get(data), upload_type="audio")
+        token = get_audio_token(AUDIO_URLS.get(data))
         if token:
             time.sleep(2)
-            max_send_media_by_token(cid, token, "audio", user_id=user_id)
+            max_send_audio_by_token(cid, token, user_id=user_id)
         return
 
     if data == "book_diagnostic":
@@ -487,10 +506,10 @@ def handle_callback(cid, data, users, callback_id=None, user_id=None):
         max_send_text(cid, f"✅ Забронировала: {slot}.\nСсылка на Zoom придёт за 30 минут. Жду встречи! 💫", user_id=user_id)
 
         # Голосовое подтверждения
-        token = get_upload_token(AUDIO_URLS["booking_confirmed"], upload_type="audio")
+        token = get_audio_token(AUDIO_URLS["booking_confirmed"])
         if token:
             time.sleep(1)
-            max_send_media_by_token(cid, token, "audio", user_id=user_id)
+            max_send_audio_by_token(cid, token, user_id=user_id)
         return
 
 # ==================== WEBHOOK ====================
