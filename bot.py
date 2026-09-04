@@ -66,7 +66,6 @@ AUDIO_URLS = {
 _planerka_event_type_id = None
 
 def _get_planerka_event_type_id():
-    """Получает ID первого доступного типа встречи из Планерки."""
     global _planerka_event_type_id
     if _planerka_event_type_id:
         return _planerka_event_type_id
@@ -81,14 +80,12 @@ def _get_planerka_event_type_id():
         resp.raise_for_status()
         data = resp.json()
         if data.get("status") == "success" and data.get("data"):
-            # Ищем тип с длительностью 30 минут или словом "диагностика"
             for et in data["data"]:
                 title = (et.get("title") or "").lower()
                 if "30" in title or "диагност" in title or "мин" in title:
                     _planerka_event_type_id = et["id"]
                     logger.info(f"Planerka event type: {et['title']} (id={et['id']})")
                     return _planerka_event_type_id
-            # Fallback: первый доступный
             _planerka_event_type_id = data["data"][0]["id"]
             logger.info(f"Planerka event type (fallback): {data['data'][0]['title']} (id={_planerka_event_type_id})")
             return _planerka_event_type_id
@@ -97,10 +94,6 @@ def _get_planerka_event_type_id():
     return None
 
 def get_planerka_slots():
-    """
-    Запрашивает свободные слоты из Планерки API.
-    Если API недоступен — fallback на ручную генерацию.
-    """
     event_type_id = _get_planerka_event_type_id()
     if not event_type_id:
         logger.warning("Нет eventTypeId — использую fallback-слоты")
@@ -133,10 +126,9 @@ def get_planerka_slots():
             for t in times:
                 start_iso = t.get("start", "")
                 dt = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
-                # Переводим в московское время (примерно)
                 dt_local = dt.astimezone() if dt.tzinfo else dt
                 wd = dt_local.weekday()
-                if wd in [1, 2, 3]:  # вт-ср-чт
+                if wd in [1, 2, 3]:
                     wd_ru = {1:"Вт", 2:"Ср", 3:"Чт"}[wd]
                     label = f"{wd_ru} {dt_local.strftime('%H:%M')}"
                     slots.append({"label": label, "value": label})
@@ -278,6 +270,20 @@ def max_send_text(chat_id, text, user_id=None):
         logger.error(f"Text send error: {e}")
         return None
 
+def max_send_to_user(user_id, text):
+    """Отправка сообщения по user_id (для админа и личных диалогов)"""
+    if not user_id:
+        return None
+    url = f"{API_BASE}/messages?user_id={user_id}"
+    try:
+        r = requests.post(url, headers=HEADERS, json={"text": text}, timeout=10, verify=False)
+        r.raise_for_status()
+        logger.info(f"Sent to user {user_id}: {r.status_code}")
+        return r.json()
+    except Exception as e:
+        logger.error(f"Send to user {user_id} error: {e}")
+        return None
+
 def max_send_with_buttons(chat_id, text, buttons, user_id=None):
     target = user_id or chat_id
     param = "user_id" if user_id else "chat_id"
@@ -320,11 +326,11 @@ def get_user(users, uid):
 
 # ==================== УВЕДОМЛЕНИЯ АДМИНУ ====================
 def notify_admin(text):
-    if ADMIN_ID:
-        try:
-            max_send_text(ADMIN_ID, f"🔔 {text}", user_id=None)
-        except Exception as e:
-            logger.error(f"Admin notify error: {e}")
+    if not ADMIN_ID:
+        logger.warning("ADMIN_ID не задан — уведомление не отправлено")
+        return
+    logger.info(f"NOTIFY ADMIN -> {ADMIN_ID}: {text[:120]}")
+    max_send_to_user(ADMIN_ID, f"🔔 {text}")
 
 # ==================== НАПОМИНАНИЕ ====================
 REMINDER_TEXT = (
@@ -713,7 +719,7 @@ def handle_callback(cid, data, users, callback_id=None, user_id=None):
             f"✅ Отлично! Ты выбрала: {slot_raw}.\n\n"
             f"Чтобы завершить запись, перейди по ссылке и подтверди время:\n"
             f"👉 {PLANERKA_DIAGNOSTIC_URL}\n\n"
-            f"Жду встречи! 💫"
+            f"Ссылка на Zoom придёт автоматически после подтверждения. Жду встречи! 💫"
         )
         max_send_text(cid, confirm_text, user_id=user_id)
         notify_admin(f"✅ User {cid} ВЫБРАЛА слот: {slot_raw} (код {u.get('result_code','')}, комната {u.get('room_choice','')})")
