@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Бот-воронка «Твой ключ на чердаке» — тестовая версия
-Max API: минимальный формат, без HTML, без кнопок
+Max API: chat_id в query param, body — только text/attachments
 """
 
 import os
@@ -12,6 +12,7 @@ import requests
 from flask import Flask, request, jsonify
 from datetime import datetime
 import urllib3
+import time
 
 # Отключаем предупреждения SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -54,14 +55,11 @@ def get_user(users, uid):
         "room_choice": ""
     })
 
-# ==================== ОТПРАВКА (МИНИМАЛЬНАЯ) ====================
+# ==================== ОТПРАВКА (chat_id в query) ====================
 def max_send_text(chat_id, text):
-    """Отправка plain text без HTML и без кнопок"""
-    url = f"{API_MESSAGES}/messages"
-    payload = {
-        "chatId": str(chat_id),
-        "text": text
-    }
+    """Отправка plain text: chat_id в URL, text в body"""
+    url = f"{API_MESSAGES}/messages?chat_id={chat_id}"
+    payload = {"text": text}
     try:
         r = requests.post(url, headers=HEADERS, json=payload, timeout=10, verify=False)
         r.raise_for_status()
@@ -72,10 +70,9 @@ def max_send_text(chat_id, text):
         return None
 
 def max_send_with_buttons(chat_id, text, buttons):
-    """Отправка с кнопками (inline keyboard)"""
-    url = f"{API_MESSAGES}/messages"
+    """Отправка с кнопками: chat_id в URL, text+attachments в body"""
+    url = f"{API_MESSAGES}/messages?chat_id={chat_id}"
     payload = {
-        "chatId": str(chat_id),
         "text": text,
         "attachments": [{
             "type": "inline_keyboard",
@@ -240,7 +237,7 @@ def handle_callback(cid, data, users):
         save_users(users)
 
         max_send_text(cid, RESULTS.get(code, RESULTS["AAA"]))
-        import time; time.sleep(2)
+        time.sleep(2)
         max_send_text(cid, AFTER_RESULT)
         time.sleep(2)
         max_send_with_buttons(cid, ROOM_CHOICE, ROOM_BTNS)
