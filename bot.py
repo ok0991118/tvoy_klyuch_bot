@@ -109,10 +109,12 @@ def parse_max_update(data):
 
     if update_type == "message_callback":
         cb = data.get("callback", {})
+        msg = data.get("message", {})
+        recipient = msg.get("recipient", {})
         return {
             "type": "callback",
-            "chat_id": cb.get("chat_id"),
-            "data": cb.get("data", ""),
+            "chat_id": recipient.get("chat_id"),
+            "data": cb.get("payload", ""),
             "user_id": cb.get("from", {}).get("user_id"),
             "callback_id": cb.get("id")
         }
@@ -132,32 +134,32 @@ WELCOME = "Привет! Я Наташа 👋\n\nСпасибо, что реши
 
 Q1 = "🚪 Комната 1: Фундамент\n\nПредставь: ты стоишь перед своим домом. Смотришь на фундамент.\n\nЧто чувствуешь?"
 Q1_BTNS = [
-    [{"type": "callback", "text": "Дом стоит крепко, но мне тесно", "callbackData": "A"}],
-    [{"type": "callback", "text": "Под домом пустота. Боюсь, что рухнет", "callbackData": "B"}],
-    [{"type": "callback", "text": "Не помню, когда строила. Достался по наследству", "callbackData": "C"}]
+    [{"type": "callback", "text": "Дом стоит крепко, но мне тесно", "payload": "A"}],
+    [{"type": "callback", "text": "Под домом пустота. Боюсь, что рухнет", "payload": "B"}],
+    [{"type": "callback", "text": "Не помню, когда строила. Достался по наследству", "payload": "C"}]
 ]
 
 Q2 = "🪟 Комната 2: Окно\n\nЗагляни в окно. Что ты видишь?"
 Q2_BTNS = [
-    [{"type": "callback", "text": "Тарелку с едой. И вина: опять", "callbackData": "A"}],
-    [{"type": "callback", "text": "Пустое кресло. Или ссору. Или уход", "callbackData": "B"}],
-    [{"type": "callback", "text": "Счета, дела, список. И усталость", "callbackData": "C"}]
+    [{"type": "callback", "text": "Тарелку с едой. И вина: опять", "payload": "A"}],
+    [{"type": "callback", "text": "Пустое кресло. Или ссору. Или уход", "payload": "B"}],
+    [{"type": "callback", "text": "Счета, дела, список. И усталость", "payload": "C"}]
 ]
 
 Q3 = "🏚️ Комната 3: Чердак\n\nТы на чердаке. В углу стоит коробка. Ты знаешь, что внутри. Но боишься открыть.\n\nЧто там?"
 Q3_BTNS = [
-    [{"type": "callback", "text": "Маленькая ты. Спрятанная, чтобы быть нормальной", "callbackData": "A"}],
-    [{"type": "callback", "text": "Ключ от двери, которую обходишь. А вдруг?", "callbackData": "B"}],
-    [{"type": "callback", "text": "Зеркало. Ты, но не та, кто сейчас", "callbackData": "C"}]
+    [{"type": "callback", "text": "Маленькая ты. Спрятанная, чтобы быть нормальной", "payload": "A"}],
+    [{"type": "callback", "text": "Ключ от двери, которую обходишь. А вдруг?", "payload": "B"}],
+    [{"type": "callback", "text": "Зеркало. Ты, но не та, кто сейчас", "payload": "C"}]
 ]
 
 AFTER_RESULT = "⚠️ Но в твоём доме есть ещё 2 закрытые комнаты.\n\n🔥 Одна из них — Комната Тела. Там лежит твоя усталость, которую ты называешь ленью.\n\n🔥 Другая — Комната Отношений. Там звучит голос, который ты приняла за свой. Но это не твой голос.\n\nИ в одной из этих комнат сейчас пожар. Ты не слышишь тревогу, потому что дверь плотно закрыта. Но дым уже идёт по вентиляции — в твою тревожность, в твою еду, в твои бессонницы.\n\nПолный обход всех 5 этажей Дома Души — в моей трансформационной игре. Там мы откроем эти двери, достанем то, что прячется в темноте, и ты получишь ключ от чердака.\n\nА пока — вот твой первый ключ 🗝️\n\nМини-техника 30 секунд до себя:\nКогда в следующий раз захочется съесть тревогу / закрыться / уйти в дела — спроси себя: А что я сейчас НЕ чувствую? Подожди 30 секунд. Ответ придёт."
 
 ROOM_CHOICE = "Я запишу для тебя личное голосовое с разбором твоего дома. Но мне нужно знать: какая из закрытых комнат тебя пугает больше?"
 ROOM_BTNS = [
-    [{"type": "callback", "text": "Комната Тела", "callbackData": "room_body"}],
-    [{"type": "callback", "text": "Комната Отношений", "callbackData": "room_relations"}],
-    [{"type": "callback", "text": "Обе", "callbackData": "room_both"}]
+    [{"type": "callback", "text": "Комната Тела", "payload": "room_body"}],
+    [{"type": "callback", "text": "Комната Отношений", "payload": "room_relations"}],
+    [{"type": "callback", "text": "Обе", "payload": "room_both"}]
 ]
 
 DIAG_TEXTS = {
@@ -166,7 +168,7 @@ DIAG_TEXTS = {
     "room_both": "Ты чувствуешь это везде. И в теле, и в отношениях. Как будто дом горит с двух сторон — и ты не знаешь, за что хвататься первым.\n\nЭто нормально. Потому что тело и отношения — это два окна в одну комнату. Комнату, где живёт твоя усталость от надо.\n\nЯ приглашаю тебя на 15-минутную бесплатную диагностику Аварийный обход. Мы определим, где пожар сильнее — и с чего начинать тушить. Без диет. Без обвинений. Просто — фонарик и правда.\n\nОсталось 2 места на этой неделе."
 }
 
-BOOK_BTN = [[{"type": "callback", "text": "Забронировать диагностику", "callbackData": "book_diagnostic"}]]
+BOOK_BTN = [[{"type": "callback", "text": "Забронировать диагностику", "payload": "book_diagnostic"}]]
 
 # ==================== 27 РЕЗУЛЬТАТОВ (БЕЗ HTML) ====================
 RESULTS = {
@@ -204,7 +206,7 @@ def handle_start(cid, users):
     u = get_user(users, cid)
     u["state"] = "q1"
     save_users(users)
-    max_send_with_buttons(cid, WELCOME, [[{"type": "callback", "text": "Открыть дверь", "callbackData": "start_quest"}]])
+    max_send_with_buttons(cid, WELCOME, [[{"type": "callback", "text": "Открыть дверь", "payload": "start_quest"}]])
 
 def handle_callback(cid, data, users):
     u = get_user(users, cid)
@@ -259,13 +261,14 @@ def handle_callback(cid, data, users):
 
         txt = "🗓 Запись на диагностику\n\nВыбери удобное время. Я провожу диагностики:\n• Вторник 11:00, 14:00, 19:00\n• Среда 10:00, 16:00, 20:00\n• Четверг 12:00, 18:00\n\nНапиши в ответ удобный день и время — я пришлю ссылку на Zoom.\n\nИли выбери быстрый слот 👇"
         slots = [
-            [{"type": "callback", "text": "Вт 19:00", "callbackData": "slot_tue_19"}],
-            [{"type": "callback", "text": "Ср 16:00", "callbackData": "slot_wed_16"}],
-            [{"type": "callback", "text": "Чт 18:00", "callbackData": "slot_thu_18"}]
+            [{"type": "callback", "text": "Вт 19:00", "payload": "slot_tue_19"}],
+            [{"type": "callback", "text": "Ср 16:00", "payload": "slot_wed_16"}],
+            [{"type": "callback", "text": "Чт 18:00", "payload": "slot_thu_18"}]
         ]
         max_send_with_buttons(cid, txt, slots)
 
         if ADMIN_ID:
+            code = u.get("result_code", "")
             max_send_text(ADMIN_ID, f"🔔 Запись! User: {cid}\nКод: {code}\nКомната: {u.get('room_choice','')}")
         return
 
